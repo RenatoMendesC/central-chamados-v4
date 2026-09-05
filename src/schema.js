@@ -28,6 +28,10 @@ async function initDatabase() {
     );
     ALTER TABLE users ADD COLUMN IF NOT EXISTS organization_id BIGINT REFERENCES organizations(id);
     ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_email VARCHAR(160);
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS subscription_ends_at TIMESTAMPTZ;
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS commercial_notes TEXT;
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS trial_days INTEGER NOT NULL DEFAULT 14;
 
     CREATE TABLE IF NOT EXISTS assets (
       id BIGSERIAL PRIMARY KEY, asset_tag VARCHAR(60) NOT NULL, name VARCHAR(140) NOT NULL,
