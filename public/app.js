@@ -53,4 +53,31 @@ async function initConfig(){await loadMe();let cfg=await api('/api/config');func
 async function initPlatform(){await loadMe();if(!me.isSuperAdmin)return location.href='/dashboard';const load=async()=>{const [sum,data]=await Promise.all([api('/api/platform/summary'),api('/api/platform/organizations')]);$('#platformKpis').innerHTML=[['Empresas',sum.organizations],['Ativas',sum.active],['Usuários',sum.users],['Chamados',sum.tickets],['Backlog',sum.backlog]].map(x=>`<div class="metric-card"><span>${x[0]}</span><strong>${x[1]}</strong></div>`).join('');$('#orgBody').innerHTML=data.organizations.map(o=>`<tr><td><strong>${esc(o.name)}</strong><small class="table-sub">${esc(o.slug)}</small></td><td><span class="pill">${esc(o.plan)}</span></td><td>${o.users}/${o.user_limit}</td><td>${o.tickets}</td><td>${o.backlog}</td><td><span class="status-dot ${o.status}">${esc(o.status)}</span></td><td><button class="btn secondary small" data-enter-org="${o.id}">Acessar</button> <button class="btn ghost small" data-edit-org="${o.id}">Editar</button></td></tr>`).join('');$$('[data-enter-org]').forEach(b=>b.onclick=()=>{localStorage.setItem('activeOrganizationId',b.dataset.enterOrg);location.href='/dashboard'});$$('[data-edit-org]').forEach(b=>b.onclick=()=>editOrganization(data.organizations.find(o=>String(o.id)===b.dataset.editOrg),load));};await load();$('#newOrgBtn').onclick=()=>newOrganization(load);$('#clearTenant')?.addEventListener('click',()=>localStorage.removeItem('activeOrganizationId'))}
 function newOrganization(reload){const bg=modal(`<div class="modal-head"><div><span class="eyebrow">NOVO CLIENTE</span><h2>Cadastrar empresa</h2><p>Cria um tenant isolado e o primeiro administrador.</p></div><button class="close" data-close>×</button></div><form id="orgForm"><div class="form-grid"><label class="field"><span>Empresa</span><input name="name" required></label><label class="field"><span>Slug</span><input name="slug" placeholder="empresa-abc" required></label><label class="field"><span>Plano</span><select name="plan"><option value="start">Start</option><option value="business">Business</option><option value="pro">Pro</option></select></label><label class="field"><span>Limite de usuários</span><input name="userLimit" type="number" value="5" min="1"></label></div><h3>Administrador da empresa</h3><div class="form-grid"><label class="field"><span>Nome</span><input name="adminName" required></label><label class="field"><span>Usuário</span><input name="adminUsername" required></label><label class="field"><span>E-mail</span><input name="adminEmail" type="email"></label><label class="field"><span>Senha inicial</span><input name="adminPassword" type="password" minlength="8" required></label></div><button class="btn primary">Criar empresa</button></form>`);$('#orgForm').onsubmit=async e=>{e.preventDefault();await api('/api/platform/organizations',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});bg.remove();toast('Empresa criada com isolamento de dados.');reload()}}
 function editOrganization(o,reload){const bg=modal(`<div class="modal-head"><div><span class="eyebrow">TENANT</span><h2>${esc(o.name)}</h2></div><button class="close" data-close>×</button></div><form id="editOrg"><label class="field"><span>Nome</span><input name="name" value="${esc(o.name)}"></label><div class="form-grid"><label class="field"><span>Plano</span><select name="plan">${['start','business','pro'].map(x=>`<option ${o.plan===x?'selected':''}>${x}</option>`).join('')}</select></label><label class="field"><span>Status</span><select name="status">${['active','trial','suspended'].map(x=>`<option ${o.status===x?'selected':''}>${x}</option>`).join('')}</select></label></div><label class="field"><span>Limite de usuários</span><input name="userLimit" type="number" value="${o.user_limit}"></label><button class="btn primary">Salvar</button></form>`);$('#editOrg').onsubmit=async e=>{e.preventDefault();await api('/api/platform/organizations/'+o.id,{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});bg.remove();reload()}}
-document.addEventListener('DOMContentLoaded',()=>{const p=document.body.dataset.page;({login:initLogin,register:initRegister,dashboard:initDashboard,tickets:initTickets,assets:initAssets,knowledge:initKnowledge,users:initUsers,reports:initReports,config:initConfig,platform:initPlatform}[p]||(()=>{}))().catch(e=>{console.error(e);feedback(e.message,'error');toast(e.message,'error')})});
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        const p = document.body.dataset.page;
+
+        const pages = {
+            login: initLogin,
+            register: initRegister,
+            dashboard: initDashboard,
+            tickets: initTickets,
+            assets: initAssets,
+            knowledge: initKnowledge,
+            users: initUsers,
+            reports: initReports,
+            config: initConfig,
+            platform: initPlatform
+        };
+
+        const init = pages[p];
+
+        if (typeof init === 'function') {
+            await init();
+        }
+    } catch (e) {
+        console.error(e);
+        feedback(e.message, 'error');
+        toast(e.message, 'error');
+    }
+});
