@@ -1,76 +1,69 @@
-# Central de Chamados V5
+# Central de Serviços — V6 Enterprise
 
-Versão multiusuário para uso em vários computadores, com Node.js, Express e PostgreSQL.
+Plataforma web multiusuário de Service Desk / Help Desk construída com **Node.js, Express e PostgreSQL**. Esta versão evolui a V5 para uma experiência mais corporativa, com gestão de chamados, SLA, ativos, conhecimento, usuários, auditoria e indicadores executivos.
 
-## Novidades da V5
+## Novidades da V6
 
-- Dashboard operacional com KPIs.
-- SLA automático por prioridade e destaque de chamados atrasados.
-- Notificações internas para novos chamados, atribuições, atualizações e comentários.
-- Anexos pequenos nos chamados (aprox. 1 MB por arquivo), armazenados no PostgreSQL.
-- Histórico de eventos de cada chamado.
-- Categorias administráveis.
-- Setores administráveis.
-- Configuração do nome do sistema e dos prazos de SLA.
-- Filtro por categoria e apenas chamados atrasados.
-- Relatórios com tempo médio de resolução e percentual de SLA cumprido.
-- Central de usuários, perfis, fotos, bloqueio e aprovação.
-- Auditoria administrativa.
+- Interface completamente redesenhada com aparência SaaS/corporativa.
+- Dashboard executivo com backlog, SLA vencido, prioridade crítica, resolvidos do dia, tempo médio de resolução e primeira resposta.
+- Indicador de saúde operacional e distribuição de carga por analista.
+- **CMDB / Gestão de Ativos**: patrimônio, tipo, fabricante, modelo, serial, usuário, setor, local, status e histórico de chamados relacionados.
+- Chamados agora podem ter **impacto**, local e ativo relacionado.
+- **Base de Conhecimento** com artigos, categorias, publicação/rascunho, edição e contador de visualizações.
+- Relatórios executivos com SLA, primeira resposta, aging do backlog, impacto, categorias e responsáveis.
+- Central de usuários com cards-resumo, perfis, bloqueio, aprovação e auditoria.
+- Configurações de marca: nome da plataforma, empresa, tagline e e-mail de suporte.
+- Rate limit no login/cadastro para reduzir tentativas automatizadas.
+- Layout responsivo para desktop, tablet e celular.
 
-## Compatibilidade com a V4
+## Perfis
 
-A V5 foi feita para utilizar o mesmo banco PostgreSQL da V4. Ao iniciar, ela cria automaticamente novas tabelas e colunas com `CREATE TABLE IF NOT EXISTS` e `ALTER TABLE ... IF NOT EXISTS`. Não é necessário apagar o banco.
+- **Administrador**: acesso total, usuários, relatórios, configurações, ativos e base de conhecimento.
+- **Analista**: chamados, dashboard, ativos e base de conhecimento.
+- **Solicitante**: dashboard, próprios chamados e base de conhecimento.
 
-## Desenvolvimento local
+## Atualização segura da V5
 
-Use o mesmo `.env` da V4:
+A V6 foi preparada para usar **o mesmo PostgreSQL da V5**. Na inicialização, o sistema executa migrações com `CREATE TABLE IF NOT EXISTS` e `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, portanto os usuários, chamados, comentários, anexos e histórico existentes são preservados.
 
-```env
-PORT=3000
-NODE_ENV=development
-DATABASE_URL=postgresql://postgres:SUA_SENHA@localhost:5432/central_chamados
-JWT_SECRET=uma-chave-com-pelo-menos-20-caracteres
-ADMIN_NAME=Renato Costa
-ADMIN_USERNAME=renato
-ADMIN_EMAIL=seu-email
-ADMIN_PASSWORD=sua-senha
-```
+Novas estruturas criadas automaticamente:
 
-Depois:
+- `assets`
+- `knowledge_articles`
+- novas colunas em `tickets`: `asset_id`, `impact`, `channel`, `location`, `first_response_at`
+- novas configurações de identidade corporativa
+
+## Executar localmente
+
+Crie um `.env` baseado em `.env.example` e configure seu PostgreSQL. Depois:
 
 ```bash
 npm install
 npm start
 ```
 
-Acesse `http://localhost:3000`.
+Abra `http://localhost:3000`.
 
-## Atualizar o sistema que já está no Render
+## Render
 
-Você não precisa criar outro Web Service nem outro PostgreSQL.
+Use o mesmo Web Service e o mesmo banco da versão anterior. Após enviar a V6 ao mesmo repositório GitHub, o Render fará um novo deploy automaticamente. Não é necessário criar outro PostgreSQL nem alterar `DATABASE_URL`.
 
-1. Faça backup da pasta V4 no computador.
-2. Substitua os arquivos do projeto pelos arquivos desta V5, mantendo o seu `.env` local.
-3. No terminal, rode:
+### Variáveis necessárias
 
-```bash
-git add .
-git commit -m "Atualização V5 - Dashboard SLA e melhorias"
-git push origin main
-```
+- `DATABASE_URL`
+- `JWT_SECRET`
+- `NODE_ENV=production`
+- `ADMIN_NAME`
+- `ADMIN_USERNAME`
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
 
-4. O Render normalmente detecta o `push` e faz um novo deploy automaticamente.
-5. Acompanhe os logs do deploy. Ao iniciar, deve aparecer `Central de Chamados V5`.
-6. Abra o mesmo link `.onrender.com`. O banco e as contas existentes permanecem.
-
-## Observação sobre anexos
-
-Nesta V5, anexos pequenos são guardados no próprio PostgreSQL para evitar depender do disco temporário do Render. Para uma futura versão com arquivos grandes, o recomendado é usar armazenamento de objetos, como Cloudinary, S3 ou equivalente.
+A conta definida por `ADMIN_*` só é criada se o usuário ainda não existir.
 
 ## Segurança
 
-- Senhas são armazenadas com bcrypt.
-- Sessões usam JWT em cookie HttpOnly.
-- Rotas administrativas exigem perfil de administrador.
-- Solicitantes visualizam apenas os próprios chamados.
-- Segredos ficam nas variáveis de ambiente e não devem ser enviados ao GitHub.
+As senhas são armazenadas com bcrypt. A autenticação usa JWT em cookie HttpOnly, `secure` em produção e `sameSite=lax`. O servidor utiliza Helmet e rate limit nas rotas de login/cadastro. Mantenha o `.env` fora do GitHub.
+
+## Observação sobre anexos
+
+Os anexos continuam armazenados no PostgreSQL em Data URL, com limite aproximado de 1 MB por arquivo. Isso é adequado para documentos pequenos e evidências. Para grande volume de arquivos, a evolução recomendada é integrar um storage de objetos como S3/R2.

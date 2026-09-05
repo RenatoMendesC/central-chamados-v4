@@ -18,6 +18,23 @@ async function initDatabase() {
       last_login_at TIMESTAMPTZ
     );
 
+    CREATE TABLE IF NOT EXISTS assets (
+      id BIGSERIAL PRIMARY KEY,
+      asset_tag VARCHAR(60) UNIQUE NOT NULL,
+      name VARCHAR(140) NOT NULL,
+      asset_type VARCHAR(80) NOT NULL DEFAULT 'Equipamento',
+      manufacturer VARCHAR(100),
+      model VARCHAR(120),
+      serial_number VARCHAR(120),
+      status VARCHAR(30) NOT NULL DEFAULT 'active' CHECK (status IN ('active','maintenance','stock','retired')),
+      assigned_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      department VARCHAR(100),
+      location VARCHAR(140),
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS tickets (
       id BIGSERIAL PRIMARY KEY,
       title VARCHAR(180) NOT NULL,
@@ -33,6 +50,11 @@ async function initDatabase() {
     );
 
     ALTER TABLE tickets ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ;
+    ALTER TABLE tickets ADD COLUMN IF NOT EXISTS asset_id BIGINT REFERENCES assets(id) ON DELETE SET NULL;
+    ALTER TABLE tickets ADD COLUMN IF NOT EXISTS impact VARCHAR(20) NOT NULL DEFAULT 'medium';
+    ALTER TABLE tickets ADD COLUMN IF NOT EXISTS channel VARCHAR(30) NOT NULL DEFAULT 'portal';
+    ALTER TABLE tickets ADD COLUMN IF NOT EXISTS location VARCHAR(140);
+    ALTER TABLE tickets ADD COLUMN IF NOT EXISTS first_response_at TIMESTAMPTZ;
 
     CREATE TABLE IF NOT EXISTS comments (
       id BIGSERIAL PRIMARY KEY,
@@ -86,6 +108,19 @@ async function initDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS knowledge_articles (
+      id BIGSERIAL PRIMARY KEY,
+      title VARCHAR(180) NOT NULL,
+      summary VARCHAR(320),
+      category VARCHAR(80),
+      content TEXT NOT NULL,
+      published BOOLEAN NOT NULL DEFAULT TRUE,
+      author_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      views INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS system_settings (
       key VARCHAR(80) PRIMARY KEY,
       value TEXT NOT NULL,
@@ -106,27 +141,29 @@ async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_tickets_requester ON tickets(requester_id);
     CREATE INDEX IF NOT EXISTS idx_tickets_assigned ON tickets(assigned_to);
     CREATE INDEX IF NOT EXISTS idx_tickets_due ON tickets(due_at);
+    CREATE INDEX IF NOT EXISTS idx_tickets_asset ON tickets(asset_id);
     CREATE INDEX IF NOT EXISTS idx_comments_ticket ON comments(ticket_id);
     CREATE INDEX IF NOT EXISTS idx_events_ticket ON ticket_events(ticket_id);
     CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_assets_tag ON assets(asset_tag);
+    CREATE INDEX IF NOT EXISTS idx_articles_published ON knowledge_articles(published, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
   `);
 
-  for (const name of ['Hardware','Software','Rede','Acesso','Impressora','Outro']) {
+  for (const name of ['Hardware','Software','Rede','Acesso','Impressora','Segurança','Telefonia','Sistemas internos','Outro']) {
     await query('INSERT INTO categories(name) VALUES($1) ON CONFLICT(name) DO NOTHING', [name]);
   }
-  for (const name of ['Administração','TI','Financeiro','RH','Operação','Comercial']) {
+  for (const name of ['Administração','TI','Financeiro','RH','Operação','Comercial','Logística','Diretoria']) {
     await query('INSERT INTO departments(name) VALUES($1) ON CONFLICT(name) DO NOTHING', [name]);
   }
   const defaults = {
-    brand_name: 'Central de Chamados',
+    brand_name: 'Central de Serviços', company_name: 'Minha Empresa', brand_tagline: 'Service Management & Support', support_email: '',
     sla_low: '72', sla_medium: '48', sla_high: '24', sla_urgent: '4'
   };
   for (const [key, value] of Object.entries(defaults)) {
     await query('INSERT INTO system_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO NOTHING', [key, value]);
   }
 
-  // Preenche prazo para chamados antigos ainda sem SLA.
   await query(`UPDATE tickets SET due_at = created_at + INTERVAL '48 hours' WHERE due_at IS NULL`);
 
   const adminUsername = (process.env.ADMIN_USERNAME || 'renato').trim().toLowerCase();
