@@ -4,7 +4,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const helmet = require('helmet');
 const bcrypt = require('bcryptjs');
-const { query, withTransaction } = require('./db');
+const { query } = require('./db');
 const { initDatabase } = require('./schema');
 const { setAuthCookie, clearAuthCookie, loadUser, requireAuth, requireRole } = require('./auth');
 
@@ -14,280 +14,72 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 20) throw new Err
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const ROOT = path.join(__dirname, '..');
-
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: false, limit: '2mb' }));
+app.use(express.json({ limit: '3mb' }));
+app.use(express.urlencoded({ extended: false, limit: '3mb' }));
 app.use(cookieParser());
 app.use('/assets', express.static(path.join(ROOT, 'public')));
 
-function page(file) { return path.join(ROOT, 'views', file); }
-function cleanText(value, max = 300) { return String(value || '').trim().slice(0, max); }
-function publicUser(u) {
-  return {
-    id: Number(u.id), name: u.name, username: u.username, email: u.email,
-    department: u.department, role: u.role, status: u.status, photoData: u.photo_data || null,
-    createdAt: u.created_at, lastLoginAt: u.last_login_at,
-  };
-}
-async function audit(actorId, action, targetType, targetId, details = {}) {
-  await query('INSERT INTO audit_logs(actor_id,action,target_type,target_id,details) VALUES($1,$2,$3,$4,$5)',
-    [actorId || null, action, targetType, targetId || null, JSON.stringify(details)]);
-}
+const page = file => path.join(ROOT, 'views', file);
+const cleanText = (v, max=300) => String(v || '').trim().slice(0,max);
+const validPriority = p => ['low','medium','high','urgent'].includes(p) ? p : 'medium';
+const validStatus = s => ['open','progress','resolved','closed'].includes(s) ? s : 'open';
+function publicUser(u){return {id:Number(u.id),name:u.name,username:u.username,email:u.email,department:u.department,role:u.role,status:u.status,photoData:u.photo_data||null,createdAt:u.created_at,lastLoginAt:u.last_login_at};}
+async function audit(actorId,action,targetType,targetId,details={}){await query('INSERT INTO audit_logs(actor_id,action,target_type,target_id,details) VALUES($1,$2,$3,$4,$5)',[actorId||null,action,targetType,targetId||null,JSON.stringify(details)]);}
+async function event(ticketId,actorId,eventType,details={}){await query('INSERT INTO ticket_events(ticket_id,actor_id,event_type,details) VALUES($1,$2,$3,$4)',[ticketId,actorId||null,eventType,JSON.stringify(details)]);}
+async function notify(userId,ticketId,title,body){if(!userId)return;await query('INSERT INTO notifications(user_id,ticket_id,title,body) VALUES($1,$2,$3,$4)',[userId,ticketId,title,body]);}
+async function setting(key,fallback){const r=await query('SELECT value FROM system_settings WHERE key=$1',[key]);return r.rows[0]?.value ?? fallback;}
+async function dueFor(priority){const hours=Number(await setting(`sla_${priority}`, {low:72,medium:48,high:24,urgent:4}[priority]));return new Date(Date.now()+Math.max(1,hours)*3600000).toISOString();}
+function canSeeTicket(user,t){return user.role!=='requester'||Number(t.requester_id)===Number(user.id);}
 
-app.get('/', async (req, res) => {
-  const user = await loadUser(req);
-  if (user) return res.redirect('/chamados');
-  res.sendFile(page('index.html'));
-});
-app.get('/criar-conta', async (req, res) => {
-  const user = await loadUser(req);
-  if (user) return res.redirect('/chamados');
-  res.sendFile(page('criar-conta.html'));
-});
-app.get('/chamados', requireAuth, (req, res) => res.sendFile(page('chamados.html')));
-app.get('/relatorios', requireAuth, requireRole('admin'), (req, res) => res.sendFile(page('relatorios.html')));
-app.get('/usuarios', requireAuth, requireRole('admin'), (req, res) => res.sendFile(page('usuarios.html')));
+app.get('/', async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect('/dashboard');res.sendFile(page('index.html'));});
+app.get('/criar-conta',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect('/dashboard');res.sendFile(page('criar-conta.html'));});
+app.get('/dashboard',requireAuth,(req,res)=>res.sendFile(page('dashboard.html')));
+app.get('/chamados',requireAuth,(req,res)=>res.sendFile(page('chamados.html')));
+app.get('/relatorios',requireAuth,requireRole('admin'),(req,res)=>res.sendFile(page('relatorios.html')));
+app.get('/usuarios',requireAuth,requireRole('admin'),(req,res)=>res.sendFile(page('usuarios.html')));
+app.get('/configuracoes',requireAuth,requireRole('admin'),(req,res)=>res.sendFile(page('configuracoes.html')));
 
-app.post('/api/auth/login', async (req, res) => {
-  const username = cleanText(req.body.username, 60).toLowerCase();
-  const password = String(req.body.password || '');
-  const result = await query('SELECT * FROM users WHERE username=$1', [username]);
-  const user = result.rows[0];
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    return res.status(401).json({ error: 'Usuário ou senha inválidos.' });
-  }
-  if (user.status === 'pending') return res.status(403).json({ error: 'Sua conta ainda aguarda aprovação do administrador.' });
-  if (user.status === 'blocked') return res.status(403).json({ error: 'Sua conta está bloqueada.' });
-  await query('UPDATE users SET last_login_at=NOW() WHERE id=$1', [user.id]);
-  setAuthCookie(res, user);
-  await audit(user.id, 'login', 'user', user.id, {});
-  res.json({ user: publicUser(user) });
-});
+app.post('/api/auth/login',async(req,res)=>{const username=cleanText(req.body.username,60).toLowerCase(),password=String(req.body.password||'');const r=await query('SELECT * FROM users WHERE username=$1',[username]);const u=r.rows[0];if(!u||!(await bcrypt.compare(password,u.password_hash)))return res.status(401).json({error:'Usuário ou senha inválidos.'});if(u.status==='pending')return res.status(403).json({error:'Sua conta ainda aguarda aprovação do administrador.'});if(u.status==='blocked')return res.status(403).json({error:'Sua conta está bloqueada.'});await query('UPDATE users SET last_login_at=NOW() WHERE id=$1',[u.id]);setAuthCookie(res,u);await audit(u.id,'login','user',u.id);res.json({user:publicUser(u)});});
+app.post('/api/auth/register',async(req,res)=>{const name=cleanText(req.body.name,120),username=cleanText(req.body.username,60).toLowerCase(),email=cleanText(req.body.email,160)||null,department=cleanText(req.body.department,100)||null,password=String(req.body.password||'');if(name.length<3||username.length<3||password.length<8)return res.status(400).json({error:'Preencha nome, usuário e uma senha com pelo menos 8 caracteres.'});if(!/^[a-z0-9._-]+$/.test(username))return res.status(400).json({error:'Usuário inválido.'});if((await query('SELECT 1 FROM users WHERE username=$1',[username])).rowCount)return res.status(409).json({error:'Esse nome de usuário já existe.'});const hash=await bcrypt.hash(password,12);const ins=await query("INSERT INTO users(name,username,email,department,role,status,password_hash) VALUES($1,$2,$3,$4,'requester','pending',$5) RETURNING id",[name,username,email,department,hash]);await audit(null,'registration_requested','user',ins.rows[0].id,{username});res.status(201).json({message:'Conta criada. Aguarde a aprovação do administrador.'});});
+app.post('/api/auth/logout',requireAuth,async(req,res)=>{await audit(req.user.id,'logout','user',req.user.id);clearAuthCookie(res);res.json({ok:true});});
+app.get('/api/me',requireAuth,(req,res)=>res.json({user:publicUser(req.user)}));
+app.patch('/api/me',requireAuth,async(req,res)=>{const name=cleanText(req.body.name,120),email=cleanText(req.body.email,160)||null,department=cleanText(req.body.department,100)||null,photoData=req.body.photoData?String(req.body.photoData):null;if(!name)return res.status(400).json({error:'Nome é obrigatório.'});if(photoData&&(!photoData.startsWith('data:image/')||photoData.length>1500000))return res.status(400).json({error:'Foto inválida ou muito grande.'});const r=await query('UPDATE users SET name=$1,email=$2,department=$3,photo_data=$4,updated_at=NOW() WHERE id=$5 RETURNING *',[name,email,department,photoData,req.user.id]);await audit(req.user.id,'profile_updated','user',req.user.id);res.json({user:publicUser(r.rows[0])});});
+app.patch('/api/me/password',requireAuth,async(req,res)=>{const current=String(req.body.currentPassword||''),next=String(req.body.newPassword||'');if(next.length<8)return res.status(400).json({error:'A nova senha deve ter pelo menos 8 caracteres.'});const r=await query('SELECT password_hash FROM users WHERE id=$1',[req.user.id]);if(!(await bcrypt.compare(current,r.rows[0].password_hash)))return res.status(400).json({error:'Senha atual incorreta.'});await query('UPDATE users SET password_hash=$1,updated_at=NOW() WHERE id=$2',[await bcrypt.hash(next,12),req.user.id]);await audit(req.user.id,'password_changed','user',req.user.id);res.json({ok:true});});
 
-app.post('/api/auth/register', async (req, res) => {
-  const name = cleanText(req.body.name, 120);
-  const username = cleanText(req.body.username, 60).toLowerCase();
-  const email = cleanText(req.body.email, 160) || null;
-  const department = cleanText(req.body.department, 100) || null;
-  const password = String(req.body.password || '');
-  if (name.length < 3 || username.length < 3 || password.length < 8) {
-    return res.status(400).json({ error: 'Preencha nome, usuário e uma senha com pelo menos 8 caracteres.' });
-  }
-  if (!/^[a-z0-9._-]+$/.test(username)) return res.status(400).json({ error: 'Usuário pode ter apenas letras minúsculas, números, ponto, hífen e underline.' });
-  const exists = await query('SELECT 1 FROM users WHERE username=$1', [username]);
-  if (exists.rowCount) return res.status(409).json({ error: 'Esse nome de usuário já existe.' });
-  const hash = await bcrypt.hash(password, 12);
-  const inserted = await query(`INSERT INTO users(name,username,email,department,role,status,password_hash)
-    VALUES($1,$2,$3,$4,'requester','pending',$5) RETURNING id`, [name, username, email, department, hash]);
-  await audit(null, 'registration_requested', 'user', inserted.rows[0].id, { username });
-  res.status(201).json({ message: 'Conta criada. Aguarde a aprovação do administrador.' });
-});
+app.get('/api/meta',requireAuth,async(req,res)=>{const [cats,deps,brand]=await Promise.all([query('SELECT id,name FROM categories WHERE active=true ORDER BY name'),query('SELECT id,name FROM departments WHERE active=true ORDER BY name'),setting('brand_name','Central de Chamados')]);res.json({categories:cats.rows,departments:deps.rows,brandName:brand});});
+app.get('/api/users/agents',requireAuth,async(req,res)=>{const r=await query("SELECT id,name,photo_data FROM users WHERE status='active' AND role IN ('admin','agent') ORDER BY name");res.json({users:r.rows.map(u=>({id:Number(u.id),name:u.name,photoData:u.photo_data||null}))});});
+app.get('/api/users',requireAuth,requireRole('admin'),async(req,res)=>{const r=await query('SELECT * FROM users ORDER BY created_at DESC');res.json({users:r.rows.map(publicUser)});});
+app.post('/api/users',requireAuth,requireRole('admin'),async(req,res)=>{const name=cleanText(req.body.name,120),username=cleanText(req.body.username,60).toLowerCase(),email=cleanText(req.body.email,160)||null,department=cleanText(req.body.department,100)||null,role=['admin','agent','requester'].includes(req.body.role)?req.body.role:'requester',status=['active','pending','blocked'].includes(req.body.status)?req.body.status:'active',password=String(req.body.password||'');if(!name||username.length<3||password.length<8)return res.status(400).json({error:'Dados inválidos.'});try{const r=await query('INSERT INTO users(name,username,email,department,role,status,password_hash) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id',[name,username,email,department,role,status,await bcrypt.hash(password,12)]);await audit(req.user.id,'user_created','user',r.rows[0].id,{username,role,status});res.status(201).json({id:Number(r.rows[0].id)});}catch(e){if(e.code==='23505')return res.status(409).json({error:'Esse usuário já existe.'});throw e;}});
+app.patch('/api/users/:id',requireAuth,requireRole('admin'),async(req,res)=>{const id=Number(req.params.id),tr=await query('SELECT * FROM users WHERE id=$1',[id]),t=tr.rows[0];if(!t)return res.status(404).json({error:'Usuário não encontrado.'});const role=['admin','agent','requester'].includes(req.body.role)?req.body.role:t.role,status=['active','pending','blocked'].includes(req.body.status)?req.body.status:t.status;if(id===req.user.id&&(role!=='admin'||status!=='active'))return res.status(400).json({error:'Você não pode remover seu próprio acesso administrativo.'});if(t.role==='admin'&&t.status==='active'&&(role!=='admin'||status!=='active')){const a=await query("SELECT COUNT(*)::int total FROM users WHERE role='admin' AND status='active'");if(a.rows[0].total<=1)return res.status(400).json({error:'O sistema precisa manter pelo menos um administrador ativo.'});}const photo=req.body.photoData===undefined?t.photo_data:(req.body.photoData||null);if(photo&&(!String(photo).startsWith('data:image/')||String(photo).length>1500000))return res.status(400).json({error:'Foto inválida ou muito grande.'});await query('UPDATE users SET name=$1,email=$2,department=$3,role=$4,status=$5,photo_data=$6,updated_at=NOW() WHERE id=$7',[cleanText(req.body.name??t.name,120),cleanText(req.body.email??t.email,160)||null,cleanText(req.body.department??t.department,100)||null,role,status,photo,id]);if(req.body.password){if(String(req.body.password).length<8)return res.status(400).json({error:'Senha precisa ter 8 caracteres.'});await query('UPDATE users SET password_hash=$1 WHERE id=$2',[await bcrypt.hash(String(req.body.password),12),id]);}await audit(req.user.id,'user_updated','user',id,{role,status});res.json({ok:true});});
+app.delete('/api/users/:id',requireAuth,requireRole('admin'),async(req,res)=>{const id=Number(req.params.id);if(id===req.user.id)return res.status(400).json({error:'Você não pode excluir sua própria conta.'});const t=(await query('SELECT * FROM users WHERE id=$1',[id])).rows[0];if(!t)return res.status(404).json({error:'Usuário não encontrado.'});const linked=(await query('SELECT COUNT(*)::int total FROM tickets WHERE requester_id=$1 OR assigned_to=$1',[id])).rows[0].total;if(linked>0)return res.status(400).json({error:'Esse usuário possui chamados vinculados. Bloqueie a conta em vez de excluir.'});await query('DELETE FROM users WHERE id=$1',[id]);await audit(req.user.id,'user_deleted','user',id,{username:t.username});res.json({ok:true});});
 
-app.post('/api/auth/logout', requireAuth, async (req, res) => {
-  await audit(req.user.id, 'logout', 'user', req.user.id, {});
-  clearAuthCookie(res);
-  res.json({ ok: true });
-});
-app.get('/api/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
+app.get('/api/tickets',requireAuth,async(req,res)=>{const q=cleanText(req.query.q,100),status=req.query.status||'',priority=req.query.priority||'',category=cleanText(req.query.category,80),overdue=req.query.overdue==='1';const args=[],where=[];if(req.user.role==='requester'){args.push(req.user.id);where.push(`t.requester_id=$${args.length}`);}if(q){args.push(`%${q}%`);where.push(`(t.title ILIKE $${args.length} OR CAST(t.id AS TEXT) ILIKE $${args.length})`);}if(['open','progress','resolved','closed'].includes(status)){args.push(status);where.push(`t.status=$${args.length}`);}if(['low','medium','high','urgent'].includes(priority)){args.push(priority);where.push(`t.priority=$${args.length}`);}if(category){args.push(category);where.push(`t.category=$${args.length}`);}if(overdue)where.push("t.due_at<NOW() AND t.status NOT IN ('resolved','closed')");const sql=`SELECT t.*,r.name requester_name,r.photo_data requester_photo,a.name assigned_name,a.photo_data assigned_photo FROM tickets t JOIN users r ON r.id=t.requester_id LEFT JOIN users a ON a.id=t.assigned_to ${where.length?'WHERE '+where.join(' AND '):''} ORDER BY CASE t.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,t.created_at DESC LIMIT 300`;res.json({tickets:(await query(sql,args)).rows});});
+app.post('/api/tickets',requireAuth,async(req,res)=>{const title=cleanText(req.body.title,180),category=cleanText(req.body.category,80),priority=validPriority(req.body.priority),description=cleanText(req.body.description,5000);if(title.length<3||!category||description.length<5)return res.status(400).json({error:'Preencha título, categoria e descrição.'});const due=await dueFor(priority);const r=await query('INSERT INTO tickets(title,category,priority,description,requester_id,due_at) VALUES($1,$2,$3,$4,$5,$6) RETURNING id',[title,category,priority,description,req.user.id,due]);const id=Number(r.rows[0].id);await event(id,req.user.id,'created',{priority,category,dueAt:due});await audit(req.user.id,'ticket_created','ticket',id,{title});const admins=await query("SELECT id FROM users WHERE status='active' AND role IN ('admin','agent')");for(const u of admins.rows)if(Number(u.id)!==Number(req.user.id))await notify(u.id,id,`Novo chamado #${id}`,title);res.status(201).json({id});});
+app.get('/api/tickets/:id',requireAuth,async(req,res)=>{const id=Number(req.params.id);const tr=await query('SELECT t.*,r.name requester_name,r.photo_data requester_photo,a.name assigned_name,a.photo_data assigned_photo FROM tickets t JOIN users r ON r.id=t.requester_id LEFT JOIN users a ON a.id=t.assigned_to WHERE t.id=$1',[id]);const t=tr.rows[0];if(!t||!canSeeTicket(req.user,t))return res.status(404).json({error:'Chamado não encontrado.'});const [comments,events,attachments]=await Promise.all([query('SELECT c.*,u.name author_name,u.photo_data author_photo FROM comments c JOIN users u ON u.id=c.author_id WHERE c.ticket_id=$1 ORDER BY c.created_at',[id]),query('SELECT e.*,u.name actor_name FROM ticket_events e LEFT JOIN users u ON u.id=e.actor_id WHERE e.ticket_id=$1 ORDER BY e.created_at DESC LIMIT 100',[id]),query('SELECT id,file_name,mime_type,size_bytes,created_at FROM attachments WHERE ticket_id=$1 ORDER BY created_at DESC',[id])]);res.json({ticket:t,comments:comments.rows,events:events.rows,attachments:attachments.rows});});
+app.patch('/api/tickets/:id',requireAuth,requireRole('admin','agent'),async(req,res)=>{const id=Number(req.params.id),tr=await query('SELECT * FROM tickets WHERE id=$1',[id]),t=tr.rows[0];if(!t)return res.status(404).json({error:'Chamado não encontrado.'});const status=validStatus(req.body.status??t.status),priority=validPriority(req.body.priority??t.priority),assigned=req.body.assignedTo?Number(req.body.assignedTo):null;let due=t.due_at;if(priority!==t.priority)due=await dueFor(priority);const resolved=['resolved','closed'].includes(status)?(t.resolved_at||new Date().toISOString()):null;await query('UPDATE tickets SET status=$1,priority=$2,assigned_to=$3,due_at=$4,resolved_at=$5,updated_at=NOW() WHERE id=$6',[status,priority,assigned,due,resolved,id]);const changes={};if(status!==t.status)changes.status={from:t.status,to:status};if(priority!==t.priority)changes.priority={from:t.priority,to:priority};if(Number(assigned||0)!==Number(t.assigned_to||0))changes.assignedTo={from:t.assigned_to,to:assigned};if(Object.keys(changes).length)await event(id,req.user.id,'updated',changes);await audit(req.user.id,'ticket_updated','ticket',id,changes);await notify(t.requester_id,id,`Chamado #${id} atualizado`,`Status/prioridade ou responsável foi atualizado.`);if(assigned&&Number(assigned)!==Number(req.user.id)&&Number(assigned)!==Number(t.assigned_to))await notify(assigned,id,`Chamado #${id} atribuído a você`,t.title);res.json({ok:true});});
+app.delete('/api/tickets/:id',requireAuth,requireRole('admin'),async(req,res)=>{const id=Number(req.params.id);await query('DELETE FROM tickets WHERE id=$1',[id]);await audit(req.user.id,'ticket_deleted','ticket',id);res.json({ok:true});});
+app.post('/api/tickets/:id/comments',requireAuth,async(req,res)=>{const id=Number(req.params.id),body=cleanText(req.body.body,3000),tr=await query('SELECT * FROM tickets WHERE id=$1',[id]),t=tr.rows[0];if(!t||!canSeeTicket(req.user,t))return res.status(404).json({error:'Chamado não encontrado.'});if(body.length<2)return res.status(400).json({error:'Comentário muito curto.'});await query('INSERT INTO comments(ticket_id,author_id,body) VALUES($1,$2,$3)',[id,req.user.id,body]);await event(id,req.user.id,'commented');const recipients=new Set([Number(t.requester_id),Number(t.assigned_to)].filter(Boolean));for(const uid of recipients)if(uid!==Number(req.user.id))await notify(uid,id,`Novo comentário no chamado #${id}`,body.slice(0,120));res.status(201).json({ok:true});});
+app.post('/api/tickets/:id/attachments',requireAuth,async(req,res)=>{const id=Number(req.params.id),tr=await query('SELECT * FROM tickets WHERE id=$1',[id]),t=tr.rows[0];if(!t||!canSeeTicket(req.user,t))return res.status(404).json({error:'Chamado não encontrado.'});const fileName=cleanText(req.body.fileName,180),mimeType=cleanText(req.body.mimeType,120),data=String(req.body.data||'');if(!fileName||!data.startsWith('data:')||data.length>1500000)return res.status(400).json({error:'Arquivo inválido ou maior que o limite de aproximadamente 1 MB.'});const size=Math.round(data.length*0.75);const r=await query('INSERT INTO attachments(ticket_id,uploaded_by,file_name,mime_type,file_data,size_bytes) VALUES($1,$2,$3,$4,$5,$6) RETURNING id',[id,req.user.id,fileName,mimeType||'application/octet-stream',data,size]);await event(id,req.user.id,'attachment_added',{fileName});res.status(201).json({id:Number(r.rows[0].id)});});
+app.get('/api/attachments/:id',requireAuth,async(req,res)=>{const r=await query('SELECT a.*,t.requester_id FROM attachments a JOIN tickets t ON t.id=a.ticket_id WHERE a.id=$1',[Number(req.params.id)]),a=r.rows[0];if(!a||!canSeeTicket(req.user,a))return res.status(404).json({error:'Arquivo não encontrado.'});res.json({fileName:a.file_name,mimeType:a.mime_type,data:a.file_data});});
 
-app.patch('/api/me', requireAuth, async (req, res) => {
-  const name = cleanText(req.body.name, 120);
-  const email = cleanText(req.body.email, 160) || null;
-  const department = cleanText(req.body.department, 100) || null;
-  const photoData = req.body.photoData ? String(req.body.photoData) : null;
-  if (!name) return res.status(400).json({ error: 'Nome é obrigatório.' });
-  if (photoData && (!photoData.startsWith('data:image/') || photoData.length > 1500000)) {
-    return res.status(400).json({ error: 'Foto inválida ou muito grande.' });
-  }
-  const result = await query(`UPDATE users SET name=$1,email=$2,department=$3,photo_data=$4,updated_at=NOW()
-    WHERE id=$5 RETURNING id,name,username,email,department,role,status,photo_data,created_at,last_login_at`,
-    [name, email, department, photoData, req.user.id]);
-  await audit(req.user.id, 'profile_updated', 'user', req.user.id, {});
-  res.json({ user: publicUser(result.rows[0]) });
-});
+app.get('/api/notifications',requireAuth,async(req,res)=>{const r=await query('SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30',[req.user.id]);res.json({notifications:r.rows,unread:r.rows.filter(x=>!x.is_read).length});});
+app.patch('/api/notifications/:id/read',requireAuth,async(req,res)=>{await query('UPDATE notifications SET is_read=true WHERE id=$1 AND user_id=$2',[Number(req.params.id),req.user.id]);res.json({ok:true});});
+app.post('/api/notifications/read-all',requireAuth,async(req,res)=>{await query('UPDATE notifications SET is_read=true WHERE user_id=$1',[req.user.id]);res.json({ok:true});});
 
-app.patch('/api/me/password', requireAuth, async (req, res) => {
-  const currentPassword = String(req.body.currentPassword || '');
-  const newPassword = String(req.body.newPassword || '');
-  if (newPassword.length < 8) return res.status(400).json({ error: 'A nova senha deve ter pelo menos 8 caracteres.' });
-  const r = await query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
-  if (!(await bcrypt.compare(currentPassword, r.rows[0].password_hash))) return res.status(400).json({ error: 'Senha atual incorreta.' });
-  const hash = await bcrypt.hash(newPassword, 12);
-  await query('UPDATE users SET password_hash=$1,updated_at=NOW() WHERE id=$2', [hash, req.user.id]);
-  await audit(req.user.id, 'password_changed', 'user', req.user.id, {});
-  res.json({ ok: true });
-});
+app.get('/api/dashboard',requireAuth,async(req,res)=>{const requesterClause=req.user.role==='requester'?'WHERE requester_id=$1':'',args=req.user.role==='requester'?[req.user.id]:[];const base=`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='open')::int open,COUNT(*) FILTER(WHERE status='progress')::int progress,COUNT(*) FILTER(WHERE priority='urgent' AND status NOT IN ('resolved','closed'))::int urgent,COUNT(*) FILTER(WHERE assigned_to IS NULL AND status NOT IN ('resolved','closed'))::int unassigned,COUNT(*) FILTER(WHERE due_at<NOW() AND status NOT IN ('resolved','closed'))::int overdue,COUNT(*) FILTER(WHERE resolved_at::date=CURRENT_DATE)::int resolved_today,ROUND(COALESCE(AVG(EXTRACT(EPOCH FROM(resolved_at-created_at))/3600) FILTER(WHERE resolved_at IS NOT NULL),0)::numeric,1) avg_hours FROM tickets ${requesterClause}`;const k=(await query(base,args)).rows[0];const recent=await query(`SELECT t.id,t.title,t.status,t.priority,t.due_at,t.created_at,a.name assigned_name FROM tickets t LEFT JOIN users a ON a.id=t.assigned_to ${req.user.role==='requester'?'WHERE t.requester_id=$1':''} ORDER BY t.created_at DESC LIMIT 7`,args);let workload=[];if(req.user.role!=='requester')workload=(await query("SELECT u.name,COUNT(t.id)::int total FROM users u LEFT JOIN tickets t ON t.assigned_to=u.id AND t.status NOT IN ('resolved','closed') WHERE u.role IN ('admin','agent') AND u.status='active' GROUP BY u.id,u.name ORDER BY total DESC,u.name")).rows;res.json({kpis:k,recent:recent.rows,workload});});
+app.get('/api/reports',requireAuth,requireRole('admin'),async(req,res)=>{const k=(await query("SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='open')::int open,COUNT(*) FILTER(WHERE status='progress')::int progress,COUNT(*) FILTER(WHERE status IN ('resolved','closed'))::int finished,COUNT(*) FILTER(WHERE due_at<NOW() AND status NOT IN ('resolved','closed'))::int overdue,ROUND(COALESCE(AVG(EXTRACT(EPOCH FROM(resolved_at-created_at))/3600) FILTER(WHERE resolved_at IS NOT NULL),0)::numeric,1) avg_hours,ROUND(COALESCE(100.0*COUNT(*) FILTER(WHERE resolved_at IS NOT NULL AND resolved_at<=due_at)/NULLIF(COUNT(*) FILTER(WHERE resolved_at IS NOT NULL),0),0)::numeric,1) sla_compliance FROM tickets")).rows[0];const group=async col=>(await query(`SELECT ${col},COUNT(*)::int total FROM tickets GROUP BY ${col} ORDER BY total DESC`)).rows;const agents=(await query("SELECT COALESCE(u.name,'Não atribuído') name,COUNT(*)::int total FROM tickets t LEFT JOIN users u ON u.id=t.assigned_to GROUP BY u.name ORDER BY total DESC")).rows;const daily=(await query("SELECT TO_CHAR(d,'DD/MM') day,COUNT(t.id)::int total FROM generate_series(CURRENT_DATE-INTERVAL '13 days',CURRENT_DATE,INTERVAL '1 day') d LEFT JOIN tickets t ON t.created_at::date=d::date GROUP BY d ORDER BY d")).rows;res.json({kpis:k,status:await group('status'),priority:await group('priority'),category:await group('category'),agents,daily});});
+app.get('/api/audit',requireAuth,requireRole('admin'),async(req,res)=>{const r=await query('SELECT a.*,u.name actor_name FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.created_at DESC LIMIT 100');res.json({logs:r.rows});});
 
-app.get('/api/users/agents', requireAuth, async (req, res) => {
-  const r = await query("SELECT id,name,photo_data FROM users WHERE status='active' AND role IN ('admin','agent') ORDER BY name");
-  res.json({ users: r.rows.map(u => ({ id:Number(u.id), name:u.name, photoData:u.photo_data || null })) });
-});
+app.get('/api/config',requireAuth,requireRole('admin'),async(req,res)=>{const [cats,deps,sets]=await Promise.all([query('SELECT * FROM categories ORDER BY name'),query('SELECT * FROM departments ORDER BY name'),query('SELECT key,value FROM system_settings ORDER BY key')]);res.json({categories:cats.rows,departments:deps.rows,settings:Object.fromEntries(sets.rows.map(x=>[x.key,x.value]))});});
+app.post('/api/config/categories',requireAuth,requireRole('admin'),async(req,res)=>{const name=cleanText(req.body.name,80);if(!name)return res.status(400).json({error:'Informe o nome.'});try{await query('INSERT INTO categories(name) VALUES($1)',[name]);res.status(201).json({ok:true});}catch(e){if(e.code==='23505')return res.status(409).json({error:'Categoria já existe.'});throw e;}});
+app.patch('/api/config/categories/:id',requireAuth,requireRole('admin'),async(req,res)=>{await query('UPDATE categories SET name=$1,active=$2 WHERE id=$3',[cleanText(req.body.name,80),Boolean(req.body.active),Number(req.params.id)]);res.json({ok:true});});
+app.post('/api/config/departments',requireAuth,requireRole('admin'),async(req,res)=>{const name=cleanText(req.body.name,100);if(!name)return res.status(400).json({error:'Informe o nome.'});try{await query('INSERT INTO departments(name) VALUES($1)',[name]);res.status(201).json({ok:true});}catch(e){if(e.code==='23505')return res.status(409).json({error:'Setor já existe.'});throw e;}});
+app.patch('/api/config/departments/:id',requireAuth,requireRole('admin'),async(req,res)=>{await query('UPDATE departments SET name=$1,active=$2 WHERE id=$3',[cleanText(req.body.name,100),Boolean(req.body.active),Number(req.params.id)]);res.json({ok:true});});
+app.patch('/api/config/settings',requireAuth,requireRole('admin'),async(req,res)=>{const allowed=['brand_name','sla_low','sla_medium','sla_high','sla_urgent'];for(const key of allowed)if(req.body[key]!==undefined){let value=cleanText(req.body[key],100);if(key.startsWith('sla_'))value=String(Math.max(1,Math.min(720,Number(value)||1)));await query('INSERT INTO system_settings(key,value,updated_at) VALUES($1,$2,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()',[key,value]);}await audit(req.user.id,'settings_updated','system',null);res.json({ok:true});});
 
-app.get('/api/users', requireAuth, requireRole('admin'), async (req, res) => {
-  const r = await query('SELECT id,name,username,email,department,role,status,photo_data,created_at,last_login_at FROM users ORDER BY created_at DESC');
-  res.json({ users: r.rows.map(publicUser) });
-});
+app.use('/api',(req,res)=>res.status(404).json({error:'Rota não encontrada.'}));
+app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Erro interno do servidor.'});});
 
-app.post('/api/users', requireAuth, requireRole('admin'), async (req, res) => {
-  const name = cleanText(req.body.name, 120);
-  const username = cleanText(req.body.username, 60).toLowerCase();
-  const email = cleanText(req.body.email, 160) || null;
-  const department = cleanText(req.body.department, 100) || null;
-  const role = ['admin','agent','requester'].includes(req.body.role) ? req.body.role : 'requester';
-  const status = ['active','pending','blocked'].includes(req.body.status) ? req.body.status : 'active';
-  const password = String(req.body.password || '');
-  if (!name || username.length < 3 || password.length < 8) return res.status(400).json({ error: 'Dados inválidos.' });
-  if (!/^[a-z0-9._-]+$/.test(username)) return res.status(400).json({ error: 'Usuário inválido.' });
-  const hash = await bcrypt.hash(password, 12);
-  try {
-    const r = await query(`INSERT INTO users(name,username,email,department,role,status,password_hash)
-      VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [name,username,email,department,role,status,hash]);
-    await audit(req.user.id, 'user_created', 'user', r.rows[0].id, { username, role, status });
-    res.status(201).json({ id: Number(r.rows[0].id) });
-  } catch (e) {
-    if (e.code === '23505') return res.status(409).json({ error: 'Esse usuário já existe.' });
-    throw e;
-  }
-});
-
-app.patch('/api/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
-  const id = Number(req.params.id);
-  const targetR = await query('SELECT * FROM users WHERE id=$1', [id]);
-  const target = targetR.rows[0];
-  if (!target) return res.status(404).json({ error: 'Usuário não encontrado.' });
-  const name = cleanText(req.body.name ?? target.name, 120);
-  const email = cleanText(req.body.email ?? target.email, 160) || null;
-  const department = cleanText(req.body.department ?? target.department, 100) || null;
-  const role = ['admin','agent','requester'].includes(req.body.role) ? req.body.role : target.role;
-  const status = ['active','pending','blocked'].includes(req.body.status) ? req.body.status : target.status;
-  const photoData = req.body.photoData === undefined ? target.photo_data : (req.body.photoData || null);
-  if (photoData && (!String(photoData).startsWith('data:image/') || String(photoData).length > 1500000)) return res.status(400).json({ error: 'Foto inválida ou muito grande.' });
-  if (id === req.user.id && (status !== 'active' || role !== 'admin')) return res.status(400).json({ error: 'Você não pode remover seu próprio acesso administrativo.' });
-  if (target.role === 'admin' && target.status === 'active' && (role !== 'admin' || status !== 'active')) {
-    const admins = await query("SELECT COUNT(*)::int AS total FROM users WHERE role='admin' AND status='active'");
-    if (admins.rows[0].total <= 1) return res.status(400).json({ error: 'O sistema precisa manter pelo menos um administrador ativo.' });
-  }
-  await query(`UPDATE users SET name=$1,email=$2,department=$3,role=$4,status=$5,photo_data=$6,updated_at=NOW() WHERE id=$7`,
-    [name,email,department,role,status,photoData,id]);
-  if (req.body.password) {
-    const p = String(req.body.password);
-    if (p.length < 8) return res.status(400).json({ error: 'A nova senha deve ter pelo menos 8 caracteres.' });
-    await query('UPDATE users SET password_hash=$1,updated_at=NOW() WHERE id=$2', [await bcrypt.hash(p,12), id]);
-  }
-  await audit(req.user.id, 'user_updated', 'user', id, { role, status });
-  res.json({ ok: true });
-});
-
-app.delete('/api/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
-  const id = Number(req.params.id);
-  if (id === req.user.id) return res.status(400).json({ error: 'Você não pode excluir sua própria conta.' });
-  const targetR = await query('SELECT role,status,username FROM users WHERE id=$1', [id]);
-  const target = targetR.rows[0];
-  if (!target) return res.status(404).json({ error: 'Usuário não encontrado.' });
-  if (target.role === 'admin' && target.status === 'active') {
-    const admins = await query("SELECT COUNT(*)::int AS total FROM users WHERE role='admin' AND status='active'");
-    if (admins.rows[0].total <= 1) return res.status(400).json({ error: 'O sistema precisa manter pelo menos um administrador ativo.' });
-  }
-  try {
-    await query('DELETE FROM users WHERE id=$1', [id]);
-  } catch (e) {
-    if (e.code === '23503') return res.status(409).json({ error: 'Este usuário possui chamados ou histórico. Bloqueie a conta em vez de excluir.' });
-    throw e;
-  }
-  await audit(req.user.id, 'user_deleted', 'user', id, { username: target.username });
-  res.json({ ok: true });
-});
-
-app.get('/api/tickets', requireAuth, async (req, res) => {
-  const params=[]; let where='WHERE 1=1';
-  if (req.user.role === 'requester') { params.push(req.user.id); where += ` AND t.requester_id=$${params.length}`; }
-  if (req.query.status && ['open','progress','resolved','closed'].includes(req.query.status)) { params.push(req.query.status); where += ` AND t.status=$${params.length}`; }
-  if (req.query.priority && ['low','medium','high','urgent'].includes(req.query.priority)) { params.push(req.query.priority); where += ` AND t.priority=$${params.length}`; }
-  if (req.query.q) { params.push(`%${cleanText(req.query.q,100)}%`); where += ` AND (t.title ILIKE $${params.length} OR ru.name ILIKE $${params.length})`; }
-  const r = await query(`SELECT t.*, ru.name requester_name, au.name assigned_name, au.photo_data assigned_photo,
-    (SELECT COUNT(*)::int FROM comments c WHERE c.ticket_id=t.id) comment_count
-    FROM tickets t JOIN users ru ON ru.id=t.requester_id LEFT JOIN users au ON au.id=t.assigned_to
-    ${where} ORDER BY CASE t.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC, t.created_at DESC`, params);
-  res.json({ tickets: r.rows });
-});
-
-app.post('/api/tickets', requireAuth, async (req,res) => {
-  const title=cleanText(req.body.title,180), category=cleanText(req.body.category,80), description=cleanText(req.body.description,5000);
-  const priority=['low','medium','high','urgent'].includes(req.body.priority)?req.body.priority:'medium';
-  if (!title || !category || !description) return res.status(400).json({error:'Preencha título, categoria e descrição.'});
-  const r=await query(`INSERT INTO tickets(title,category,priority,description,requester_id) VALUES($1,$2,$3,$4,$5) RETURNING id`,[title,category,priority,description,req.user.id]);
-  await audit(req.user.id,'ticket_created','ticket',r.rows[0].id,{title});
-  res.status(201).json({id:Number(r.rows[0].id)});
-});
-
-app.get('/api/tickets/:id', requireAuth, async (req,res) => {
-  const id=Number(req.params.id);
-  const r=await query(`SELECT t.*,ru.name requester_name,ru.photo_data requester_photo,au.name assigned_name,au.photo_data assigned_photo
-    FROM tickets t JOIN users ru ON ru.id=t.requester_id LEFT JOIN users au ON au.id=t.assigned_to WHERE t.id=$1`,[id]);
-  const ticket=r.rows[0];
-  if (!ticket) return res.status(404).json({error:'Chamado não encontrado.'});
-  if (req.user.role==='requester' && Number(ticket.requester_id)!==req.user.id) return res.status(403).json({error:'Sem permissão.'});
-  const comments=await query(`SELECT c.id,c.body,c.created_at,u.id author_id,u.name author_name,u.photo_data author_photo
-    FROM comments c JOIN users u ON u.id=c.author_id WHERE c.ticket_id=$1 ORDER BY c.created_at`,[id]);
-  res.json({ticket,comments:comments.rows});
-});
-
-app.patch('/api/tickets/:id', requireAuth, requireRole('admin','agent'), async (req,res) => {
-  const id=Number(req.params.id);
-  const oldR=await query('SELECT * FROM tickets WHERE id=$1',[id]);
-  const old=oldR.rows[0]; if(!old) return res.status(404).json({error:'Chamado não encontrado.'});
-  const status=['open','progress','resolved','closed'].includes(req.body.status)?req.body.status:old.status;
-  const priority=['low','medium','high','urgent'].includes(req.body.priority)?req.body.priority:old.priority;
-  const assignedTo = (req.body.assignedTo === null || req.body.assignedTo === '') ? null : (req.body.assignedTo !== undefined ? Number(req.body.assignedTo) : (old.assigned_to ? Number(old.assigned_to) : null));
-  if (assignedTo) {
-    const valid=await query("SELECT 1 FROM users WHERE id=$1 AND status='active' AND role IN ('admin','agent')",[assignedTo]);
-    if(!valid.rowCount) return res.status(400).json({error:'Responsável inválido.'});
-  }
-  await query(`UPDATE tickets SET status=$1,priority=$2,assigned_to=$3,updated_at=NOW(),resolved_at=CASE WHEN $1 IN ('resolved','closed') THEN COALESCE(resolved_at,NOW()) ELSE NULL END WHERE id=$4`,[status,priority,assignedTo,id]);
-  await audit(req.user.id,'ticket_updated','ticket',id,{status,priority,assignedTo});
-  res.json({ok:true});
-});
-
-app.post('/api/tickets/:id/comments', requireAuth, async (req,res) => {
-  const id=Number(req.params.id), body=cleanText(req.body.body,3000);
-  if(!body) return res.status(400).json({error:'Comentário vazio.'});
-  const t=await query('SELECT requester_id FROM tickets WHERE id=$1',[id]); if(!t.rowCount) return res.status(404).json({error:'Chamado não encontrado.'});
-  if(req.user.role==='requester' && Number(t.rows[0].requester_id)!==req.user.id) return res.status(403).json({error:'Sem permissão.'});
-  await query('INSERT INTO comments(ticket_id,author_id,body) VALUES($1,$2,$3)',[id,req.user.id,body]);
-  await query('UPDATE tickets SET updated_at=NOW() WHERE id=$1',[id]);
-  await audit(req.user.id,'comment_added','ticket',id,{});
-  res.status(201).json({ok:true});
-});
-
-app.delete('/api/tickets/:id', requireAuth, requireRole('admin'), async (req,res) => {
-  const id=Number(req.params.id); await query('DELETE FROM tickets WHERE id=$1',[id]);
-  await audit(req.user.id,'ticket_deleted','ticket',id,{}); res.json({ok:true});
-});
-
-app.get('/api/reports', requireAuth, requireRole('admin'), async (req,res) => {
-  const [kpis,status,priority,category,agents,daily] = await Promise.all([
-    query(`SELECT COUNT(*)::int total, COUNT(*) FILTER(WHERE status='open')::int open, COUNT(*) FILTER(WHERE status='progress')::int progress, COUNT(*) FILTER(WHERE status IN ('resolved','closed'))::int finished FROM tickets`),
-    query('SELECT status,COUNT(*)::int total FROM tickets GROUP BY status'),
-    query('SELECT priority,COUNT(*)::int total FROM tickets GROUP BY priority'),
-    query('SELECT category,COUNT(*)::int total FROM tickets GROUP BY category ORDER BY total DESC'),
-    query(`SELECT COALESCE(u.name,'Não atribuído') name,COUNT(*)::int total FROM tickets t LEFT JOIN users u ON u.id=t.assigned_to GROUP BY u.name ORDER BY total DESC`),
-    query(`SELECT d::date day,COUNT(t.id)::int total FROM generate_series(CURRENT_DATE-13,CURRENT_DATE,'1 day') d LEFT JOIN tickets t ON t.created_at::date=d::date GROUP BY d ORDER BY d`)
-  ]);
-  res.json({kpis:kpis.rows[0],status:status.rows,priority:priority.rows,category:category.rows,agents:agents.rows,daily:daily.rows});
-});
-
-app.get('/api/audit', requireAuth, requireRole('admin'), async (req,res) => {
-  const r=await query(`SELECT a.*,u.name actor_name FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.created_at DESC LIMIT 100`);
-  res.json({logs:r.rows});
-});
-
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ error: 'Erro interno do servidor.' });
-});
-
-initDatabase().then(() => {
-  app.listen(PORT, () => console.log(`Central de Chamados em http://localhost:${PORT}`));
-}).catch(err => { console.error('Falha ao iniciar:', err); process.exit(1); });
+initDatabase().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`Central de Chamados V5 em http://localhost:${PORT}`))).catch(err=>{console.error('Falha ao iniciar:',err);process.exit(1);});

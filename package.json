@@ -1,8 +1,8 @@
 {
-  "name": "central-chamados-v4",
-  "version": "4.0.0",
+  "name": "central-chamados-v5",
+  "version": "5.0.0",
   "private": true,
-  "description": "Central de Chamados multiusuario com Node.js, Express e PostgreSQL",
+  "description": "Central de Chamados multiusuario V5 com Dashboard, SLA, notificacoes, anexos e PostgreSQL",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
