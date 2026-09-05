@@ -1,8 +1,8 @@
 {
-  "name": "central-chamados-v6-enterprise",
-  "version": "6.0.0",
+  "name": "central-servicos-v7-saas",
+  "version": "7.0.0",
   "private": true,
-  "description": "Central de Serviços V6 Enterprise - Help Desk multiusuario com SLA, ativos, base de conhecimento e PostgreSQL",
+  "description": "Central de Serviços V7 SaaS Multiempresa - Help Desk multi-tenant com isolamento por organização",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
