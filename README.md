@@ -1,12 +1,39 @@
-# Central de Serviços — V8 Comercial
+# Central de Serviços V8 Clean
 
-Evolução comercial da V7 SaaS Multiempresa.
+Versão reconstruída sobre a base multiempresa estável, com foco em produto SaaS comercial e operação B2B.
 
-## Novidades
-- Botão **Voltar à Plataforma** quando o Super Admin estiver dentro de uma empresa.
+## Destaques
+
+- Multiempresa com isolamento por `organization_id` em todas as entidades operacionais.
+- Super Admin com Control Plane, modo suporte e retorno explícito à plataforma.
+- Planos Start, Business e Pro, trial, limites de usuários e gestão comercial.
+- Dashboard, chamados, SLA, ativos/CMDB, base de conhecimento, relatórios, auditoria e notificações.
 - Página comercial pública em `/apresentacao`.
-- Estrutura de banco para e-mail financeiro, validade de assinatura, observações comerciais e dias de trial.
-- KPIs de empresas em trial e suspensas no backend.
-- Branding preparado por tenant (`primary_color` e `brand_logo`).
-- Inicialização JavaScript robusta, corrigindo o problema de `.catch` em funções síncronas.
-- Mesma base multiempresa e mesmo PostgreSQL da V7.
+- Cache de JS/CSS desativado no servidor + versionamento de assets para evitar deploy antigo no navegador.
+- Migrações idempotentes que preservam os dados existentes no PostgreSQL.
+
+## Variáveis obrigatórias
+
+```env
+DATABASE_URL=postgresql://...
+JWT_SECRET=uma-chave-forte-com-mais-de-20-caracteres
+ADMIN_USERNAME=renato
+ADMIN_PASSWORD=troque-esta-senha
+ADMIN_NAME=Renato Costa
+ADMIN_EMAIL=seu-email@dominio.com
+DEFAULT_ORG_NAME=Minha Empresa
+NODE_ENV=production
+```
+
+## Rodar
+
+```bash
+npm install
+npm start
+```
+
+Health check: `/health`
+
+## Deploy
+
+Pronto para Render com Node 20+ e PostgreSQL. Não crie outro banco ao atualizar uma instalação existente: as migrações são executadas no startup.

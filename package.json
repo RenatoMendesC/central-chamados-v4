@@ -1,8 +1,8 @@
 {
-  "name": "central-servicos-v7-saas",
-  "version": "7.0.0",
+  "name": "central-servicos-v8-clean",
+  "version": "8.0.0",
   "private": true,
-  "description": "Central de Serviços V7 SaaS Multiempresa - Help Desk multi-tenant com isolamento por organização",
+  "description": "Central de Serviços V8 Clean — SaaS multiempresa comercial, multi-tenant e enterprise-ready",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

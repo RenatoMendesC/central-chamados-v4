@@ -32,6 +32,8 @@ async function initDatabase() {
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS subscription_ends_at TIMESTAMPTZ;
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS commercial_notes TEXT;
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS trial_days INTEGER NOT NULL DEFAULT 14;
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS contact_name VARCHAR(120);
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS contact_phone VARCHAR(40);
 
     CREATE TABLE IF NOT EXISTS assets (
       id BIGSERIAL PRIMARY KEY, asset_tag VARCHAR(60) NOT NULL, name VARCHAR(140) NOT NULL,
