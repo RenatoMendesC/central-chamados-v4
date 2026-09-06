@@ -75,7 +75,472 @@ async function openInvite(){const bg=modal(`<div class="modal-head"><div><span c
 async function initUsers(){await loadMe();await loadUsers();const {logs}=await api('/api/audit');$('#audit').innerHTML=logs.slice(0,30).map(l=>`<div class="audit-row"><div><strong>${esc(l.actor_name||'Sistema')}</strong><small>${esc(l.target_type)}${l.target_id?` #${l.target_id}`:''}</small></div><span>${esc(l.action.replaceAll('_',' '))}</span><time>${fmt(l.created_at)}</time></div>`).join('');$('#newUserBtn').onclick=newUser;$('#inviteUserBtn')?.addEventListener('click',openInvite)}
 async function initReports(){await loadMe();const r=await api('/api/reports');const ks=[['Volume total',r.kpis.total,'Chamados registrados'],['Backlog',Number(r.kpis.open)+Number(r.kpis.progress),'Pendências atuais'],['SLA vencido',r.kpis.overdue,'Fora do prazo'],['SLA cumprido',`${r.kpis.sla_compliance}%`,'Resolvidos no prazo'],['Tempo resolução',`${r.kpis.avg_hours}h`,'Média geral'],['1ª resposta',`${r.kpis.avg_first_response_min}m`,'Tempo médio']];$('#kpis').innerHTML=ks.map(x=>`<div class="metric-card"><div class="metric-top"><span>${x[0]}</span></div><strong>${x[1]}</strong><small>${x[2]}</small></div>`).join('');function bars(id,data,key,label){const max=Math.max(1,...data.map(x=>Number(x.total)));$(id).innerHTML=data.map(x=>`<div class="bar-row"><div><span>${esc(label?label[x[key]]||x[key]:x[key]||'Não atribuído')}</span><strong>${x.total}</strong></div><div class="bar"><i style="width:${pct(x.total,max)}%"></i></div></div>`).join('')}bars('#statusBars',r.status,'status',ticketStatus);bars('#priorityBars',r.priority,'priority',priorityLabel);bars('#categoryBars',r.category,'category');bars('#agentBars',r.agents,'name');bars('#dailyBars',r.daily,'day');bars('#impactBars',r.impact,'impact',impactLabel);$('#aging').innerHTML=`<div class="aging-item"><strong>${r.aging.under24}</strong><span>Até 24h</span></div><div class="aging-item"><strong>${r.aging.h24_72}</strong><span>24–72h</span></div><div class="aging-item danger"><strong>${r.aging.over72}</strong><span>Acima de 72h</span></div>`}
 
-async function initConfig(){await loadMe();let cfg=await api('/api/config');function render(){const s=cfg.settings,f=$('#settingsForm');['brand_name','company_name','brand_tagline','support_email','primary_color','sla_low','sla_medium','sla_high','sla_urgent'].forEach(k=>{if(f[k])f[k].value=s[k]||''});$('#catList').innerHTML=cfg.categories.map(c=>`<div class="config-row"><input value="${esc(c.name)}" data-cat-name="${c.id}"><label class="switch"><input type="checkbox" data-cat-active="${c.id}" ${c.active?'checked':''}><span></span></label><button class="btn secondary small" data-cat-save="${c.id}">Salvar</button></div>`).join('');$('#depList').innerHTML=cfg.departments.map(c=>`<div class="config-row"><input value="${esc(c.name)}" data-dep-name="${c.id}"><label class="switch"><input type="checkbox" data-dep-active="${c.id}" ${c.active?'checked':''}><span></span></label><button class="btn secondary small" data-dep-save="${c.id}">Salvar</button></div>`).join('');$$('[data-cat-save]').forEach(b=>b.onclick=async()=>{const id=b.dataset.catSave;await api('/api/config/categories/'+id,{method:'PATCH',body:JSON.stringify({name:$(`[data-cat-name="${id}"]`).value,active:$(`[data-cat-active="${id}"]`).checked})});cfg=await api('/api/config');render()});$$('[data-dep-save]').forEach(b=>b.onclick=async()=>{const id=b.dataset.depSave;await api('/api/config/departments/'+id,{method:'PATCH',body:JSON.stringify({name:$(`[data-dep-name="${id}"]`).value,active:$(`[data-dep-active="${id}"]`).checked})});cfg=await api('/api/config');render()})}render();$('#settingsForm').onsubmit=async e=>{e.preventDefault();await api('/api/config/settings',{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('Configurações salvas.');setTimeout(()=>location.reload(),500)};$('#addCat').onsubmit=async e=>{e.preventDefault();await api('/api/config/categories',{method:'POST',body:JSON.stringify({name:e.target.name.value})});e.target.reset();cfg=await api('/api/config');render()};$('#addDep').onsubmit=async e=>{e.preventDefault();await api('/api/config/departments',{method:'POST',body:JSON.stringify({name:e.target.name.value})});e.target.reset();cfg=await api('/api/config');render()}}
+async function initConfig(){
+  await loadMe();
+
+  let cfg=await api('/api/config');
+
+  function render(){
+    const s=cfg.settings;
+    const f=$('#settingsForm');
+
+    [
+      'brand_name',
+      'company_name',
+      'brand_tagline',
+      'support_email',
+      'primary_color',
+      'sla_low',
+      'sla_medium',
+      'sla_high',
+      'sla_urgent'
+    ].forEach(k=>{
+      if(f[k]){
+        f[k].value=s[k]||'';
+      }
+    });
+
+    $('#catList').innerHTML=
+      cfg.categories.map(c=>`
+        <div class="config-row">
+          <input
+            value="${esc(c.name)}"
+            data-cat-name="${c.id}"
+          >
+
+          <label class="switch">
+            <input
+              type="checkbox"
+              data-cat-active="${c.id}"
+              ${c.active?'checked':''}
+            >
+            <span></span>
+          </label>
+
+          <button
+            class="btn secondary small"
+            data-cat-save="${c.id}"
+          >
+            Salvar
+          </button>
+        </div>
+      `).join('');
+
+    $('#depList').innerHTML=
+      cfg.departments.map(c=>`
+        <div class="config-row">
+          <input
+            value="${esc(c.name)}"
+            data-dep-name="${c.id}"
+          >
+
+          <label class="switch">
+            <input
+              type="checkbox"
+              data-dep-active="${c.id}"
+              ${c.active?'checked':''}
+            >
+            <span></span>
+          </label>
+
+          <button
+            class="btn secondary small"
+            data-dep-save="${c.id}"
+          >
+            Salvar
+          </button>
+        </div>
+      `).join('');
+
+    $$('[data-cat-save]').forEach(b=>{
+      b.onclick=async()=>{
+        const id=b.dataset.catSave;
+
+        await api(
+          '/api/config/categories/'+id,
+          {
+            method:'PATCH',
+            body:JSON.stringify({
+              name:$(
+                `[data-cat-name="${id}"]`
+              ).value,
+
+              active:$(
+                `[data-cat-active="${id}"]`
+              ).checked
+            })
+          }
+        );
+
+        cfg=await api('/api/config');
+        render();
+      };
+    });
+
+    $$('[data-dep-save]').forEach(b=>{
+      b.onclick=async()=>{
+        const id=b.dataset.depSave;
+
+        await api(
+          '/api/config/departments/'+id,
+          {
+            method:'PATCH',
+            body:JSON.stringify({
+              name:$(
+                `[data-dep-name="${id}"]`
+              ).value,
+
+              active:$(
+                `[data-dep-active="${id}"]`
+              ).checked
+            })
+          }
+        );
+
+        cfg=await api('/api/config');
+        render();
+      };
+    });
+  }
+
+  render();
+
+
+  /* ============================================
+     CONFIGURAÇÕES NORMAIS
+     ============================================ */
+
+  $('#settingsForm').onsubmit=async e=>{
+    e.preventDefault();
+
+    await api(
+      '/api/config/settings',
+      {
+        method:'PATCH',
+        body:JSON.stringify(
+          Object.fromEntries(
+            new FormData(e.target)
+          )
+        )
+      }
+    );
+
+    toast('Configurações salvas.');
+
+    setTimeout(
+      ()=>location.reload(),
+      500
+    );
+  };
+
+
+  $('#addCat').onsubmit=async e=>{
+    e.preventDefault();
+
+    await api(
+      '/api/config/categories',
+      {
+        method:'POST',
+        body:JSON.stringify({
+          name:e.target.name.value
+        })
+      }
+    );
+
+    e.target.reset();
+
+    cfg=await api('/api/config');
+
+    render();
+  };
+
+
+  $('#addDep').onsubmit=async e=>{
+    e.preventDefault();
+
+    await api(
+      '/api/config/departments',
+      {
+        method:'POST',
+        body:JSON.stringify({
+          name:e.target.name.value
+        })
+      }
+    );
+
+    e.target.reset();
+
+    cfg=await api('/api/config');
+
+    render();
+  };
+
+
+  /* ============================================
+     BILLING
+     ============================================ */
+
+  const billingCurrent=
+    $('#billingCurrent');
+
+  const money=value=>{
+    if(
+      value===null ||
+      value===undefined ||
+      value===''
+    ){
+      return '—';
+    }
+
+    return Number(value).toLocaleString(
+      'pt-BR',
+      {
+        style:'currency',
+        currency:'BRL'
+      }
+    );
+  };
+
+
+  const statusLabel={
+    authorized:'Ativa',
+    pending:'Pendente',
+    paused:'Pausada',
+    cancelled:'Cancelada',
+    inactive:'Sem assinatura'
+  };
+
+
+  async function loadBilling(){
+    try{
+      const data=
+        await api(
+          '/api/billing/subscription'
+        );
+
+      const org=
+        data.organization||{};
+
+      const subscription=
+        data.subscription;
+
+      const currentPlan=
+        String(
+          org.plan||''
+        ).toLowerCase();
+
+      const currentStatus=
+        subscription?.status ||
+        org.billing_status ||
+        'inactive';
+
+
+      if(billingCurrent){
+        let html=`
+          <strong>
+            Plano atual:
+          </strong>
+          ${esc(
+            currentPlan
+              ?currentPlan.toUpperCase()
+              :'—'
+          )}
+          &nbsp; • &nbsp;
+
+          <strong>
+            Status:
+          </strong>
+          ${
+            statusLabel[currentStatus] ||
+            esc(currentStatus)
+          }
+        `;
+
+        if(
+          subscription?.amount
+        ){
+          html+=`
+            &nbsp; • &nbsp;
+
+            <strong>
+              Valor:
+            </strong>
+            ${money(
+              subscription.amount
+            )}
+          `;
+        }
+
+        if(
+          subscription?.nextPaymentDate
+        ){
+          html+=`
+            &nbsp; • &nbsp;
+
+            <strong>
+              Próxima cobrança:
+            </strong>
+            ${new Date(
+              subscription.nextPaymentDate
+            ).toLocaleDateString(
+              'pt-BR'
+            )}
+          `;
+        }
+
+        billingCurrent.innerHTML=html;
+      }
+
+
+      /* destacar plano atual */
+
+      $$('[data-billing-plan]')
+        .forEach(card=>{
+          const cardPlan=
+            card.dataset.billingPlan;
+
+          card.style.outline='';
+
+          const btn=
+            card.querySelector(
+              '.billing-subscribe'
+            );
+
+          if(
+            cardPlan===currentPlan
+          ){
+            card.style.outline=
+              '1px solid var(--primary)';
+
+            if(
+              btn &&
+              currentStatus==='authorized'
+            ){
+              btn.disabled=true;
+              btn.textContent='Plano atual';
+            }
+          }
+        });
+
+
+    }catch(err){
+      console.error(
+        'Erro ao carregar billing:',
+        err
+      );
+
+      if(billingCurrent){
+        billingCurrent.textContent=
+          'Não foi possível carregar as informações da assinatura.';
+      }
+    }
+  }
+
+
+  /* ============================================
+     ASSINAR
+     ============================================ */
+
+  $$('.billing-subscribe')
+    .forEach(btn=>{
+
+      btn.onclick=async()=>{
+
+        const plan=
+          btn.dataset.plan;
+
+        const originalText=
+          btn.textContent;
+
+        btn.disabled=true;
+        btn.textContent=
+          'Abrindo Mercado Pago...';
+
+        try{
+          const email=
+            cfg.organization
+              ?.billing_email ||
+            me?.email ||
+            '';
+
+          const result=
+            await api(
+              '/api/billing/subscribe',
+              {
+                method:'POST',
+
+                body:JSON.stringify({
+                  plan,
+                  email
+                })
+              }
+            );
+
+          if(
+            !result.checkoutUrl
+          ){
+            throw new Error(
+              'O Mercado Pago não retornou a URL do checkout.'
+            );
+          }
+
+          toast(
+            'Redirecionando para o Mercado Pago...'
+          );
+
+          setTimeout(()=>{
+            window.location.href=
+              result.checkoutUrl;
+          },400);
+
+        }catch(err){
+          console.error(
+            'Erro ao criar assinatura:',
+            err
+          );
+
+          btn.disabled=false;
+          btn.textContent=
+            originalText;
+
+          toast(
+            err.message ||
+            'Não foi possível criar a assinatura.',
+            'error'
+          );
+        }
+      };
+    });
+
+
+  /* ============================================
+     RETORNO DO MERCADO PAGO
+     ============================================ */
+
+  const params=
+    new URLSearchParams(
+      window.location.search
+    );
+
+  if(
+    params.get('billing')===
+    'return'
+  ){
+    toast(
+      'Retorno do Mercado Pago recebido. Atualizando assinatura...'
+    );
+
+    setTimeout(
+      async()=>{
+        await loadBilling();
+      },
+      1200
+    );
+  }
+
+
+  await loadBilling();
+}
 
 async function initPlatform(){
   localStorage.removeItem('activeOrganizationId');

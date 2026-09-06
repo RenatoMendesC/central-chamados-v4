@@ -34,6 +34,12 @@ async function initDatabase() {
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS trial_days INTEGER NOT NULL DEFAULT 14;
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS contact_name VARCHAR(120);
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS contact_phone VARCHAR(40);
+        /* Mercado Pago / Billing */
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS mp_subscription_id VARCHAR(120);
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_status VARCHAR(30) NOT NULL DEFAULT 'inactive';
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_updated_at TIMESTAMPTZ;
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS last_payment_at TIMESTAMPTZ;
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS next_payment_at TIMESTAMPTZ;
 
     CREATE TABLE IF NOT EXISTS assets (
       id BIGSERIAL PRIMARY KEY, asset_tag VARCHAR(60) NOT NULL, name VARCHAR(140) NOT NULL,
