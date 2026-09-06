@@ -17,7 +17,6 @@ const canSee=(u,t)=>u.role!=='requester'||Number(t.requester_id)===Number(u.id);
 // Pages
 app.get('/',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect(u.is_super_admin?'/plataforma':'/dashboard');res.sendFile(page('index.html'));});
 app.get('/apresentacao',(req,res)=>res.sendFile(page('apresentacao.html')));
-app.get('/apresentacao',(req,res)=>res.sendFile(page('apresentacao.html')));
 app.get('/criar-conta',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect('/dashboard');res.sendFile(page('criar-conta.html'));});
 for(const [url,file,roles] of [['/dashboard','dashboard.html',[]],['/chamados','chamados.html',[]],['/ativos','ativos.html',['admin','agent']],['/base-conhecimento','base-conhecimento.html',[]],['/relatorios','relatorios.html',['admin']],['/usuarios','usuarios.html',['admin']],['/configuracoes','configuracoes.html',['admin']]])app.get(url,requireAuth,...(roles.length?[requireRole(...roles)]:[]),(req,res)=>res.sendFile(page(file)));
 app.get('/plataforma',requireAuth,requireSuperAdmin,(req,res)=>res.sendFile(page('plataforma.html')));
@@ -534,101 +533,92 @@ async function syncMercadoPagoSubscription(
 }
 
 
-/* --------------------------------------------
-   WEBHOOK MERCADO PAGO
-   -------------------------------------------- */
-
-app.post(
-  '/api/billing/webhook',
-  async (req, res) => {
-
-    /*
-      Respondemos rapidamente ao Mercado Pago.
-
-      A confirmação real sempre será consultada
-      novamente na API usando nosso Access Token.
-    */
-
-    res.status(200).json({
-      received: true
-    });
-
-    try {
-
-      const type =
-        req.body?.type ||
-        req.query?.type ||
-        req.body?.topic ||
-        req.query?.topic;
-
-      const dataId =
-        req.body?.data?.id ||
-        req.query?.['data.id'] ||
-        req.body?.id;
-
-      console.log(
-        'Webhook Mercado Pago:',
-        type,
-        dataId
-      );
-
-      /*
-        Criação ou atualização da assinatura.
-      */
-
-      if (
-        type === 'subscription_preapproval' &&
-        dataId
-      ) {
-        await syncMercadoPagoSubscription(
-          String(dataId)
-        );
-
-        return;
-      }
-
-      /*
-        Pagamento recorrente da assinatura.
-
-        Por enquanto registramos o evento.
-        Depois podemos evoluir para histórico
-        completo de faturas.
-      */
-
-      if (
-        type === 'subscription_authorized_payment'
-      ) {
-        console.log(
-          'Pagamento recorrente recebido:',
-          dataId
-        );
-      }
-
-      if (type === 'payment') {
-        console.log(
-          'Atualização de pagamento:',
-          dataId
-        );
-      }
-
-    } catch (error) {
-      console.error(
-        'Erro webhook Mercado Pago:',
-        error
-      );
-    }
-  }
-);
 /* ============================================
    MERCADO PAGO - WEBHOOK
    ============================================ */
 
+function validateMercadoPagoWebhook(req) {
+  const secret = process.env.MP_WEBHOOK_SECRET;
+  const xSignature = String(req.get('x-signature') || '');
+  const xRequestId = String(req.get('x-request-id') || '');
+
+  // O teste do painel pode chegar sem os cabeçalhos reais.
+  // Respondemos 200, mas não usamos o payload para alterar planos.
+  if (!xSignature || !xRequestId) {
+    return { valid: false, testOrUnsigned: true };
+  }
+
+  if (!secret) {
+    console.error('[Mercado Pago] MP_WEBHOOK_SECRET não configurado.');
+    return { valid: false, testOrUnsigned: false };
+  }
+
+  const dataId = String(
+    req.query?.['data.id'] ||
+    req.body?.data?.id ||
+    req.query?.id ||
+    req.body?.id ||
+    ''
+  ).toLowerCase();
+
+  if (!dataId) {
+    return { valid: false, testOrUnsigned: false };
+  }
+
+  const parts = {};
+
+  xSignature.split(',').forEach(part => {
+    const [key, value] = part.split('=');
+    if (key && value) parts[key.trim()] = value.trim();
+  });
+
+  const ts = parts.ts;
+  const receivedHash = parts.v1;
+
+  if (!ts || !receivedHash) {
+    return { valid: false, testOrUnsigned: false };
+  }
+
+  const manifest =
+    `id:${dataId};` +
+    `request-id:${xRequestId};` +
+    `ts:${ts};`;
+
+  const calculatedHash = crypto
+    .createHmac('sha256', secret)
+    .update(manifest)
+    .digest('hex');
+
+  try {
+    const receivedBuffer = Buffer.from(receivedHash, 'hex');
+    const calculatedBuffer = Buffer.from(calculatedHash, 'hex');
+
+    if (
+      receivedBuffer.length === 0 ||
+      receivedBuffer.length !== calculatedBuffer.length
+    ) {
+      return { valid: false, testOrUnsigned: false };
+    }
+
+    return {
+      valid: crypto.timingSafeEqual(
+        receivedBuffer,
+        calculatedBuffer
+      ),
+      testOrUnsigned: false
+    };
+  } catch (error) {
+    console.error(
+      '[Mercado Pago] Falha ao validar assinatura:',
+      error
+    );
+    return { valid: false, testOrUnsigned: false };
+  }
+}
+
 app.post('/api/billing/webhook', async (req, res) => {
-  /*
-   * Respondemos rapidamente ao Mercado Pago.
-   * O processamento continua logo abaixo.
-   */
-  res.sendStatus(200);
+  // Confirma rapidamente o recebimento para o Mercado Pago.
+  res.status(200).json({ received: true });
 
   try {
     const type =
@@ -642,21 +632,29 @@ app.post('/api/billing/webhook', async (req, res) => {
       req.body?.data?.id ||
       req.query?.['data.id'] ||
       req.query?.id ||
+      req.body?.id ||
       null;
 
-    console.log(
-      '[Mercado Pago Webhook]',
-      {
-        type,
-        dataId
-      }
-    );
+    console.log('[Mercado Pago Webhook]', {
+      type,
+      dataId
+    });
 
-    /*
-     * ==========================================
-     * ASSINATURA
-     * ==========================================
-     */
+    const signature = validateMercadoPagoWebhook(req);
+
+    if (!signature.valid) {
+      if (signature.testOrUnsigned) {
+        console.log(
+          '[Mercado Pago] Teste/evento sem assinatura recebido. Nenhuma alteração aplicada.'
+        );
+        return;
+      }
+
+      console.warn(
+        '[Mercado Pago] Assinatura do webhook inválida. Evento ignorado.'
+      );
+      return;
+    }
 
     if (
       type === 'subscription_preapproval' ||
@@ -669,209 +667,22 @@ app.post('/api/billing/webhook', async (req, res) => {
         return;
       }
 
-      const subscription =
-        await mercadoPagoRequest(
-          `/preapproval/${encodeURIComponent(dataId)}`
-        );
-
-      const subscriptionId =
-        subscription.id;
-
-      const subscriptionStatus =
-        subscription.status || 'pending';
-
-      const externalReference =
-        String(
-          subscription.external_reference || ''
-        );
-
-      /*
-       * Nossa referência tem este formato:
-       *
-       * org:1:plan:start
-       * org:2:plan:business
-       * org:3:plan:pro
-       */
-
-      const match =
-        externalReference.match(
-          /^org:(\d+):plan:(start|business|pro)$/
-        );
-
-      if (!match) {
-        console.log(
-          '[Mercado Pago] external_reference desconhecida:',
-          externalReference
-        );
-        return;
-      }
-
-      const organizationId =
-        Number(match[1]);
-
-      const planId =
-        match[2];
-
-      const plan =
-        BILLING_PLANS[planId];
-
-      if (!plan) {
-        console.log(
-          '[Mercado Pago] Plano desconhecido:',
-          planId
-        );
-        return;
-      }
-
-      /*
-       * authorized = assinatura aprovada/ativa.
-       *
-       * Somente aqui liberamos efetivamente
-       * o plano contratado.
-       */
-
-      if (subscriptionStatus === 'authorized') {
-        await query(
-          `
-          UPDATE organizations
-          SET
-            plan=$1,
-            user_limit=$2,
-            status='active',
-            billing_status=$3,
-            mp_subscription_id=$4,
-            subscription_ends_at=NULL,
-            updated_at=NOW()
-          WHERE id=$5
-          `,
-          [
-            planId,
-            plan.userLimit,
-            subscriptionStatus,
-            subscriptionId,
-            organizationId
-          ]
-        );
-
-        console.log(
-          `[Mercado Pago] Empresa ${organizationId} ativada no plano ${planId}.`
-        );
-
-        return;
-      }
-
-      /*
-       * Assinatura ainda aguardando aprovação.
-       */
-
-      if (subscriptionStatus === 'pending') {
-        await query(
-          `
-          UPDATE organizations
-          SET
-            billing_status=$1,
-            mp_subscription_id=$2,
-            updated_at=NOW()
-          WHERE id=$3
-          `,
-          [
-            subscriptionStatus,
-            subscriptionId,
-            organizationId
-          ]
-        );
-
-        console.log(
-          `[Mercado Pago] Assinatura ${subscriptionId} pendente.`
-        );
-
-        return;
-      }
-
-      /*
-       * Assinatura pausada.
-       */
-
-      if (subscriptionStatus === 'paused') {
-        await query(
-          `
-          UPDATE organizations
-          SET
-            billing_status=$1,
-            updated_at=NOW()
-          WHERE id=$2
-          `,
-          [
-            subscriptionStatus,
-            organizationId
-          ]
-        );
-
-        console.log(
-          `[Mercado Pago] Assinatura da empresa ${organizationId} pausada.`
-        );
-
-        return;
-      }
-
-      /*
-       * Assinatura cancelada.
-       */
-
-      if (
-        subscriptionStatus === 'cancelled' ||
-        subscriptionStatus === 'canceled'
-      ) {
-        await query(
-          `
-          UPDATE organizations
-          SET
-            billing_status='cancelled',
-            updated_at=NOW()
-          WHERE id=$1
-          `,
-          [organizationId]
-        );
-
-        console.log(
-          `[Mercado Pago] Assinatura da empresa ${organizationId} cancelada.`
-        );
-
-        return;
-      }
-
-      /*
-       * Qualquer outro status recebido.
-       */
-
-      await query(
-        `
-        UPDATE organizations
-        SET
-          billing_status=$1,
-          updated_at=NOW()
-        WHERE id=$2
-        `,
-        [
-          subscriptionStatus,
-          organizationId
-        ]
-      );
+      await syncMercadoPagoSubscription(String(dataId));
 
       console.log(
-        '[Mercado Pago] Status atualizado:',
-        subscriptionStatus
+        `[Mercado Pago] Assinatura ${dataId} sincronizada.`
       );
 
       return;
     }
 
-
-    /*
-     * ==========================================
-     * PAGAMENTO
-     * ==========================================
-     */
+    if (type === 'subscription_authorized_payment') {
+      console.log(
+        '[Mercado Pago] Pagamento recorrente recebido:',
+        dataId
+      );
+      return;
+    }
 
     if (
       type === 'payment' ||
@@ -884,39 +695,23 @@ app.post('/api/billing/webhook', async (req, res) => {
         return;
       }
 
-      const payment =
-        await mercadoPagoRequest(
-          `/v1/payments/${encodeURIComponent(dataId)}`
-        );
-
-      console.log(
-        '[Mercado Pago] Pagamento:',
-        {
-          id: payment.id,
-          status: payment.status,
-          externalReference:
-            payment.external_reference
-        }
+      const payment = await mercadoPagoRequest(
+        `/v1/payments/${encodeURIComponent(dataId)}`
       );
 
-      /*
-       * O estado principal da empresa continua
-       * sendo sincronizado pelo preapproval.
-       *
-       * O pagamento é consultado diretamente
-       * no Mercado Pago para não confiar nos
-       * dados enviados pelo webhook.
-       */
+      console.log('[Mercado Pago] Pagamento:', {
+        id: payment.id,
+        status: payment.status,
+        externalReference: payment.external_reference
+      });
 
       return;
     }
-
 
     console.log(
       '[Mercado Pago] Evento ignorado:',
       type
     );
-
   } catch (error) {
     console.error(
       '[Mercado Pago Webhook] Erro:',
@@ -924,5 +719,6 @@ app.post('/api/billing/webhook', async (req, res) => {
     );
   }
 });
+
 app.get('/health',(req,res)=>res.json({ok:true,version:'8.0.0-clean',mode:'multi-tenant-saas',time:new Date().toISOString()}));app.use('/api',(req,res)=>res.status(404).json({error:'Rota não encontrada.'}));app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Erro interno do servidor.'});});
 initDatabase().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`Central de Serviços V8 Clean em http://localhost:${PORT}`))).catch(e=>{console.error('Falha ao iniciar:',e);process.exit(1);});
