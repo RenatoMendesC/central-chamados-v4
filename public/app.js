@@ -42,7 +42,7 @@ async function loadMe(){
     $('#profileMenu').onclick=openProfile;
     $('#logoutBtn').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});localStorage.removeItem('activeOrganizationId');location.href='/'};
   }
-  renderTrialBanner();
+  showTrialWelcome();
   await loadNotifications();
 }
 
@@ -111,63 +111,76 @@ function getTrialInfo(){
   };
 }
 
-function renderTrialBanner(){
-  const info = getTrialInfo();
+function showTrialWelcome(){
+  const info=getTrialInfo();
 
-  document
-    .querySelectorAll('.trial-banner')
-    .forEach(x=>x.remove());
-
-  if(!info){
+  if(!info || me?.isSuperAdmin){
     return;
   }
 
-  const banner = document.createElement('div');
-  banner.className =
-    `trial-banner${info.expired?' expired':''}`;
+  /*
+    Mostra apenas uma vez por sessão do navegador.
+    Uma nova entrada/login em outra sessão poderá exibir novamente.
+  */
+  const orgId=me?.organizationId||me?.organization_id||'org';
+  const sessionKey=`trialWelcome:${orgId}:${info.expired?'expired':'active'}`;
 
-  if(info.expired){
-    banner.innerHTML = `
-      <div>
-        <strong>Seu período de teste terminou.</strong>
-        <span>Assine um plano para continuar utilizando a Central de Serviços.</span>
-      </div>
-      ${me?.role==='admin'
-        ? '<button class="btn primary small" data-trial-billing>Ver planos</button>'
-        : '<span>Entre em contato com o administrador da sua empresa.</span>'
-      }
-    `;
-  }else{
-    banner.innerHTML = `
-      <div>
-        <strong>Período de teste</strong>
-        <span>
-          ${info.days} ${info.days===1?'dia restante':'dias restantes'}
-          ${info.end?` · até ${fmtShort(info.end)}`:''}
-        </span>
-      </div>
-      ${me?.role==='admin'
-        ? '<button class="btn secondary small" data-trial-billing>Ver planos</button>'
-        : ''
-      }
-    `;
+  if(sessionStorage.getItem(sessionKey)==='1'){
+    return;
   }
 
-  const host =
-    document.querySelector('.main-content') ||
-    document.querySelector('main') ||
-    document.querySelector('.content') ||
-    document.body;
+  sessionStorage.setItem(sessionKey,'1');
 
-  host.prepend(banner);
+  const isAdmin=me?.role==='admin';
 
-  banner
-    .querySelector('[data-trial-billing]')
-    ?.addEventListener(
-      'click',
-      ()=>location.href='/configuracoes'
-    );
+  const title=info.expired
+    ? 'Seu período de teste terminou'
+    : 'Seu período de teste está ativo';
+
+  const description=info.expired
+    ? (
+        isAdmin
+          ? 'Para continuar utilizando todos os recursos da Central de Serviços, escolha um dos planos disponíveis.'
+          : 'O período de teste da sua empresa terminou. Entre em contato com o administrador para continuar utilizando a plataforma.'
+      )
+    : `Você tem ${info.days} ${info.days===1?'dia restante':'dias restantes'} para explorar a Central de Serviços${info.end?` — seu teste vai até ${fmtShort(info.end)}`:''}.`;
+
+  const bg=modal(`
+    <div class="modal-head">
+      <div>
+        <span class="eyebrow">${info.expired?'PERÍODO ENCERRADO':'BEM-VINDO À CENTRAL'}</span>
+        <h2>${title}</h2>
+        <p>${description}</p>
+      </div>
+      <button class="close" data-close aria-label="Fechar">×</button>
+    </div>
+
+    ${!info.expired?`
+      <div style="margin:8px 0 4px;padding:16px 18px;border:1px solid var(--border);border-radius:14px;background:var(--panel2);">
+        <strong style="display:block;font-size:1.05rem;margin-bottom:5px;">
+          ${info.days} ${info.days===1?'dia restante':'dias restantes'}
+        </strong>
+        <span style="color:var(--muted);font-size:.92rem;">
+          Aproveite para testar chamados, ativos, usuários, relatórios e os demais recursos disponíveis.
+        </span>
+      </div>
+    `:''}
+
+    <div class="modal-actions" style="margin-top:22px;">
+      <button type="button" class="btn ghost" data-close>Fechar</button>
+      ${isAdmin
+        ? '<button type="button" class="btn primary" id="trialSubscribeNow">Assinar agora</button>'
+        : ''
+      }
+    </div>
+  `);
+
+  $('#trialSubscribeNow')?.addEventListener('click',()=>{
+    bg.remove();
+    location.href='/configuracoes#billing';
+  });
 }
+
 async function loadNotifications(){if(!me||!$('#notifHost'))return;const r=await api('/api/notifications');$('#notifHost').innerHTML=`<button class="icon-btn" id="notifBtn" aria-label="Notificações">◉${r.unread?`<span class="counter">${r.unread}</span>`:''}</button><div class="notif-panel hidden" id="notifPanel"><div class="notif-head"><div><strong>Notificações</strong><small>${r.unread} não lida(s)</small></div><button id="readAll">Marcar todas</button></div>${r.notifications.length?r.notifications.map(n=>`<button class="notif-item ${n.is_read?'':'unread'}" data-notif="${n.id}" data-ticket="${n.ticket_id||''}"><i></i><div><strong>${esc(n.title)}</strong><small>${esc(n.body||'')}</small><time>${fmt(n.created_at)}</time></div></button>`).join(''):'<div class="empty-mini">Nenhuma notificação.</div>'}</div>`;$('#notifBtn').onclick=()=>$('#notifPanel').classList.toggle('hidden');$('#readAll').onclick=async()=>{await api('/api/notifications/read-all',{method:'POST'});loadNotifications()};$$('[data-notif]').forEach(b=>b.onclick=async()=>{await api(`/api/notifications/${b.dataset.notif}/read`,{method:'PATCH'});b.dataset.ticket?location.href=`/chamados?ticket=${b.dataset.ticket}`:loadNotifications()})}
 async function openProfile(){let photo=me.photoData;const bg=modal(`<div class="modal-head"><div><span class="eyebrow">CONTA</span><h2>Meu perfil</h2><p>Atualize suas informações pessoais e credenciais.</p></div><button class="close" data-close>×</button></div><form id="profileForm"><div class="profile-line"><div class="photo-preview" id="photoPreview">${photo?`<img src="${photo}">`:esc(me.name[0])}</div><label class="file-label">Alterar foto<input type="file" id="profilePhoto" accept="image/*"></label></div><div class="form-grid"><label class="field"><span>Nome completo</span><input name="name" value="${esc(me.name)}" required></label><label class="field"><span>E-mail</span><input name="email" type="email" value="${esc(me.email||'')}"></label></div><label class="field"><span>Setor</span><input name="department" value="${esc(me.department||'')}"></label><button class="btn primary">Salvar perfil</button></form><div class="divider"></div><form id="passwordForm"><h3>Segurança</h3><div class="form-grid"><label class="field"><span>Senha atual</span><input name="currentPassword" type="password" required></label><label class="field"><span>Nova senha</span><input name="newPassword" type="password" minlength="8" required></label></div><button class="btn secondary">Alterar senha</button></form>`);$('#profilePhoto').onchange=async e=>{photo=await photoToDataUrl(e.target.files[0]);$('#photoPreview').innerHTML=`<img src="${photo}">`};$('#profileForm').onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target));d.photoData=photo;const r=await api('/api/me',{method:'PATCH',body:JSON.stringify(d)});me=r.user;bg.remove();loadMe();toast('Perfil atualizado.')};$('#passwordForm').onsubmit=async e=>{e.preventDefault();await api('/api/me/password',{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('Senha alterada.');e.target.reset()}}
 
