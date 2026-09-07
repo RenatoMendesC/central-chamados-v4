@@ -26,7 +26,38 @@ app.post('/api/auth/login',limiter,async(req,res)=>{const username=clean(req.bod
 app.get('/api/public/invite/:token',async(req,res)=>{const r=await query(`SELECT i.email,i.role,i.expires_at,o.name organization_name FROM invitations i JOIN organizations o ON o.id=i.organization_id WHERE i.token=$1 AND i.used_at IS NULL AND i.expires_at>NOW() AND o.status!='suspended'`,[clean(req.params.token,96)]);if(!r.rowCount)return res.status(404).json({error:'Convite inválido ou expirado.'});res.json({invite:r.rows[0]});});
 app.post('/api/auth/register',limiter,async(req,res)=>{const token=clean(req.body.inviteToken,96),inv=(await query(`SELECT i.* FROM invitations i JOIN organizations o ON o.id=i.organization_id WHERE i.token=$1 AND i.used_at IS NULL AND i.expires_at>NOW() AND o.status!='suspended'`,[token])).rows[0];if(!inv)return res.status(400).json({error:'Cadastro permitido somente por convite válido.'});const name=clean(req.body.name,120),username=clean(req.body.username,60).toLowerCase(),email=clean(req.body.email,160)||inv.email||null,department=clean(req.body.department,100)||null,password=String(req.body.password||'');if(name.length<3||username.length<3||password.length<8)return res.status(400).json({error:'Preencha os dados e use senha de pelo menos 8 caracteres.'});if(!/^[a-z0-9._-]+$/.test(username))return res.status(400).json({error:'Usuário inválido.'});if((await query('SELECT 1 FROM users WHERE username=$1',[username])).rowCount)return res.status(409).json({error:'Esse usuário já existe.'});const lim=(await query('SELECT user_limit FROM organizations WHERE id=$1',[inv.organization_id])).rows[0].user_limit,count=(await query("SELECT COUNT(*)::int n FROM users WHERE organization_id=$1 AND status!='blocked'",[inv.organization_id])).rows[0].n;if(count>=lim)return res.status(403).json({error:'A empresa atingiu o limite de usuários do plano.'});const r=await query("INSERT INTO users(organization_id,name,username,email,department,role,status,password_hash) VALUES($1,$2,$3,$4,$5,$6,'active',$7) RETURNING id",[inv.organization_id,name,username,email,department,inv.role,await bcrypt.hash(password,12)]);await query('UPDATE invitations SET used_at=NOW() WHERE id=$1',[inv.id]);res.status(201).json({message:'Conta criada. Você já pode entrar.',id:Number(r.rows[0].id)});});
 app.post('/api/auth/logout',requireAuth,async(req,res)=>{clearAuthCookie(res);res.json({ok:true});});
-app.get('/api/me',requireAuth,(req,res)=>res.json({user:pub(req.user)}));
+app.get('/api/me', requireAuth, (req, res) => {
+  const user = pub(req.user);
+
+  user.organizationStatus =
+    req.user.organization_status || null;
+
+  user.organizationPlan =
+    req.user.organization_plan || null;
+
+  user.organizationTrialDays =
+    req.user.organization_trial_days || null;
+
+  user.organizationTrialEndsAt =
+    req.user.organization_trial_ends_at || null;
+
+  user.organizationBillingStatus =
+    req.user.organization_billing_status || null;
+
+  user.organizationSubscriptionEndsAt =
+    req.user.organization_subscription_ends_at || null;
+
+  user.trialExpired =
+    Boolean(req.user.trial_expired);
+
+  user.subscriptionExpired =
+    Boolean(req.user.subscription_expired);
+
+  user.billingRequired =
+    Boolean(req.user.billing_required);
+
+  res.json({ user });
+});
 app.patch('/api/me',requireAuth,async(req,res)=>{const photo=req.body.photoData?String(req.body.photoData):null;if(photo&&(!photo.startsWith('data:image/')||photo.length>1500000))return res.status(400).json({error:'Foto inválida.'});const r=await query('UPDATE users SET name=$1,email=$2,department=$3,photo_data=$4,updated_at=NOW() WHERE id=$5 RETURNING *',[clean(req.body.name,120),clean(req.body.email,160)||null,clean(req.body.department,100)||null,photo,req.user.id]);res.json({user:pub({...r.rows[0],organization_name:req.user.organization_name})});});
 app.patch('/api/me/password',requireAuth,async(req,res)=>{const r=await query('SELECT password_hash FROM users WHERE id=$1',[req.user.id]),next=String(req.body.newPassword||'');if(next.length<8||!(await bcrypt.compare(String(req.body.currentPassword||''),r.rows[0].password_hash)))return res.status(400).json({error:'Senha atual incorreta ou nova senha inválida.'});await query('UPDATE users SET password_hash=$1 WHERE id=$2',[await bcrypt.hash(next,12),req.user.id]);res.json({ok:true});});
 
