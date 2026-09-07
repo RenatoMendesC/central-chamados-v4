@@ -42,7 +42,131 @@ async function loadMe(){
     $('#profileMenu').onclick=openProfile;
     $('#logoutBtn').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});localStorage.removeItem('activeOrganizationId');location.href='/'};
   }
+  renderTrialBanner();
   await loadNotifications();
+}
+
+/* ============================================
+   TRIAL / COBRANÇA
+   ============================================ */
+
+function getTrialInfo(){
+  if(!me || me.isSuperAdmin){
+    return null;
+  }
+
+  const org = meta?.organization || {};
+
+  const status =
+    String(
+      org.status ||
+      me.organizationStatus ||
+      me.organization_status ||
+      ''
+    ).toLowerCase();
+
+  const trialEndsAt =
+    org.trial_ends_at ||
+    org.trialEndsAt ||
+    me.organizationTrialEndsAt ||
+    me.organization_trial_ends_at ||
+    null;
+
+  const billingRequired =
+    Boolean(
+      me.billingRequired ??
+      me.billing_required ??
+      false
+    );
+
+  if(status !== 'trial' && !billingRequired){
+    return null;
+  }
+
+  if(!trialEndsAt){
+    return billingRequired
+      ? {expired:true,days:0,end:null}
+      : null;
+  }
+
+  const end = new Date(trialEndsAt);
+
+  if(Number.isNaN(end.getTime())){
+    return null;
+  }
+
+  const remainingMs = end.getTime() - Date.now();
+  const expired = billingRequired || remainingMs <= 0;
+  const days = expired
+    ? 0
+    : Math.max(
+        1,
+        Math.ceil(remainingMs / 86400000)
+      );
+
+  return {
+    expired,
+    days,
+    end
+  };
+}
+
+function renderTrialBanner(){
+  const info = getTrialInfo();
+
+  document
+    .querySelectorAll('.trial-banner')
+    .forEach(x=>x.remove());
+
+  if(!info){
+    return;
+  }
+
+  const banner = document.createElement('div');
+  banner.className =
+    `trial-banner${info.expired?' expired':''}`;
+
+  if(info.expired){
+    banner.innerHTML = `
+      <div>
+        <strong>Seu período de teste terminou.</strong>
+        <span>Assine um plano para continuar utilizando a Central de Serviços.</span>
+      </div>
+      ${me?.role==='admin'
+        ? '<button class="btn primary small" data-trial-billing>Ver planos</button>'
+        : '<span>Entre em contato com o administrador da sua empresa.</span>'
+      }
+    `;
+  }else{
+    banner.innerHTML = `
+      <div>
+        <strong>Período de teste</strong>
+        <span>
+          ${info.days} ${info.days===1?'dia restante':'dias restantes'}
+          ${info.end?` · até ${fmtShort(info.end)}`:''}
+        </span>
+      </div>
+      ${me?.role==='admin'
+        ? '<button class="btn secondary small" data-trial-billing>Ver planos</button>'
+        : ''
+      }
+    `;
+  }
+
+  const host =
+    document.querySelector('.main-content') ||
+    document.querySelector('main') ||
+    document.querySelector('.content') ||
+    document.body;
+
+  host.prepend(banner);
+
+  banner
+    .querySelector('[data-trial-billing]')
+    ?.addEventListener(
+      'click',
+      ()=>location.href='/configuracoes'
+    );
 }
 async function loadNotifications(){if(!me||!$('#notifHost'))return;const r=await api('/api/notifications');$('#notifHost').innerHTML=`<button class="icon-btn" id="notifBtn" aria-label="Notificações">◉${r.unread?`<span class="counter">${r.unread}</span>`:''}</button><div class="notif-panel hidden" id="notifPanel"><div class="notif-head"><div><strong>Notificações</strong><small>${r.unread} não lida(s)</small></div><button id="readAll">Marcar todas</button></div>${r.notifications.length?r.notifications.map(n=>`<button class="notif-item ${n.is_read?'':'unread'}" data-notif="${n.id}" data-ticket="${n.ticket_id||''}"><i></i><div><strong>${esc(n.title)}</strong><small>${esc(n.body||'')}</small><time>${fmt(n.created_at)}</time></div></button>`).join(''):'<div class="empty-mini">Nenhuma notificação.</div>'}</div>`;$('#notifBtn').onclick=()=>$('#notifPanel').classList.toggle('hidden');$('#readAll').onclick=async()=>{await api('/api/notifications/read-all',{method:'POST'});loadNotifications()};$$('[data-notif]').forEach(b=>b.onclick=async()=>{await api(`/api/notifications/${b.dataset.notif}/read`,{method:'PATCH'});b.dataset.ticket?location.href=`/chamados?ticket=${b.dataset.ticket}`:loadNotifications()})}
 async function openProfile(){let photo=me.photoData;const bg=modal(`<div class="modal-head"><div><span class="eyebrow">CONTA</span><h2>Meu perfil</h2><p>Atualize suas informações pessoais e credenciais.</p></div><button class="close" data-close>×</button></div><form id="profileForm"><div class="profile-line"><div class="photo-preview" id="photoPreview">${photo?`<img src="${photo}">`:esc(me.name[0])}</div><label class="file-label">Alterar foto<input type="file" id="profilePhoto" accept="image/*"></label></div><div class="form-grid"><label class="field"><span>Nome completo</span><input name="name" value="${esc(me.name)}" required></label><label class="field"><span>E-mail</span><input name="email" type="email" value="${esc(me.email||'')}"></label></div><label class="field"><span>Setor</span><input name="department" value="${esc(me.department||'')}"></label><button class="btn primary">Salvar perfil</button></form><div class="divider"></div><form id="passwordForm"><h3>Segurança</h3><div class="form-grid"><label class="field"><span>Senha atual</span><input name="currentPassword" type="password" required></label><label class="field"><span>Nova senha</span><input name="newPassword" type="password" minlength="8" required></label></div><button class="btn secondary">Alterar senha</button></form>`);$('#profilePhoto').onchange=async e=>{photo=await photoToDataUrl(e.target.files[0]);$('#photoPreview').innerHTML=`<img src="${photo}">`};$('#profileForm').onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target));d.photoData=photo;const r=await api('/api/me',{method:'PATCH',body:JSON.stringify(d)});me=r.user;bg.remove();loadMe();toast('Perfil atualizado.')};$('#passwordForm').onsubmit=async e=>{e.preventDefault();await api('/api/me/password',{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('Senha alterada.');e.target.reset()}}
