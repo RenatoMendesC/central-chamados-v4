@@ -1,39 +1,17 @@
-# Central de Serviços V8 Clean
+# Central de Serviços V9
 
-Versão reconstruída sobre a base multiempresa estável, com foco em produto SaaS comercial e operação B2B.
+V9 com nova área de Assinatura e Histórico de Atividades/Auditoria.
 
-## Destaques
+## Principais novidades
+- Página `/assinatura` acessível a todos os usuários autenticados.
+- Plano atual, trial, validade, próxima cobrança, usuários utilizados e detalhes da assinatura.
+- Página `/historico` para Administradores e Analistas.
+- Auditoria de chamados, ativos, usuários, conhecimento, configurações e cobrança.
+- Configurações voltam a ser exclusivas de Administradores.
+- Modal de trial aponta diretamente para `/assinatura`.
 
-- Multiempresa com isolamento por `organization_id` em todas as entidades operacionais.
-- Super Admin com Control Plane, modo suporte e retorno explícito à plataforma.
-- Planos Start, Business e Pro, trial, limites de usuários e gestão comercial.
-- Dashboard, chamados, SLA, ativos/CMDB, base de conhecimento, relatórios, auditoria e notificações.
-- Página comercial pública em `/apresentacao`.
-- Cache de JS/CSS desativado no servidor + versionamento de assets para evitar deploy antigo no navegador.
-- Migrações idempotentes que preservam os dados existentes no PostgreSQL.
+## Atualização
+Substitua os arquivos da instalação atual pelos arquivos da V9, mantenha seu `.env` e execute `npm install` / `npm start`. O `schema.js` adiciona as colunas de cobrança ausentes usando `ADD COLUMN IF NOT EXISTS`.
 
-## Variáveis obrigatórias
-
-```env
-DATABASE_URL=postgresql://...
-JWT_SECRET=uma-chave-forte-com-mais-de-20-caracteres
-ADMIN_USERNAME=renato
-ADMIN_PASSWORD=troque-esta-senha
-ADMIN_NAME=Renato Costa
-ADMIN_EMAIL=seu-email@dominio.com
-DEFAULT_ORG_NAME=Minha Empresa
-NODE_ENV=production
-```
-
-## Rodar
-
-```bash
-npm install
-npm start
-```
-
-Health check: `/health`
-
-## Deploy
-
-Pronto para Render com Node 20+ e PostgreSQL. Não crie outro banco ao atualizar uma instalação existente: as migrações são executadas no startup.
+## Mercado Pago
+As variáveis atuais são preservadas: `MP_MODE`, `MP_TEST_ACCESS_TOKEN`, `MP_TEST_PAYER_EMAIL`, `MP_ACCESS_TOKEN`, `MP_WEBHOOK_SECRET`, `APP_URL`.

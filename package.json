@@ -1,8 +1,8 @@
 {
-  "name": "central-servicos-v8-clean",
-  "version": "8.0.0",
+  "name": "central-servicos-v8-comercial",
+  "version": "9.1.0",
   "private": true,
-  "description": "Central de Serviços V8 Clean — SaaS multiempresa comercial, multi-tenant e enterprise-ready",
+  "description": "Central de Serviços V9 - SaaS multiempresa com assinatura e auditoria",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

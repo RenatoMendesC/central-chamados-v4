@@ -26,7 +26,8 @@ async function loadMe(){
   $$('[data-company]').forEach(x=>x.textContent=meta.companyName);
   $$('[data-tagline]').forEach(x=>x.textContent=meta.tagline);
   $$('[data-admin]').forEach(x=>x.style.display=me.role==='admin'?'':'none');
-  $$('[data-staff]').forEach(x=>x.style.display=me.role!=='requester'?'':'none');
+  $$('[data-staff]').forEach(x=>x.style.display=(me.isSuperAdmin||me.role!=='requester')?'':'none');
+  $$('[data-superadmin]').forEach(x=>x.style.display=me.isSuperAdmin?'':'none');
   if(me.isSuperAdmin&&localStorage.getItem('activeOrganizationId')){
     const h=document.querySelector('.top-actions');
     if(h&&!document.getElementById('tenantMode')){
@@ -42,8 +43,34 @@ async function loadMe(){
     $('#profileMenu').onclick=openProfile;
     $('#logoutBtn').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});localStorage.removeItem('activeOrganizationId');location.href='/'};
   }
+  ensureV9Navigation();
   showTrialWelcome();
   await loadNotifications();
+}
+
+
+/* ============================================
+   V9 - NAVEGAÇÃO
+   ============================================ */
+function ensureV9Navigation(){
+  const sidebar=document.querySelector('.sidebar');
+  if(!sidebar)return;
+  const bottom=sidebar.querySelector('.side-bottom');
+  if(!bottom)return;
+
+  if(me?.role!=='requester'&&!sidebar.querySelector('a[href="/historico"]')){
+    const title=document.createElement('div');title.className='nav-group-title v9-nav';title.textContent='Governança';
+    const nav=document.createElement('nav');nav.className='nav v9-nav';
+    nav.innerHTML='<a href="/historico"><span class="nav-glyph">◷</span><span>Histórico</span></a>';
+    bottom.before(title,nav);
+  }
+
+  if(!sidebar.querySelector('a[href="/assinatura"]')){
+    const title=document.createElement('div');title.className='nav-group-title v9-nav';title.textContent='Empresa';
+    const nav=document.createElement('nav');nav.className='nav v9-nav';
+    nav.innerHTML='<a href="/assinatura"><span class="nav-glyph">◇</span><span>Assinatura</span></a>';
+    bottom.before(title,nav);
+  }
 }
 
 /* ============================================
@@ -173,7 +200,7 @@ function showTrialWelcome(){
 
   $('#trialSubscribeNow')?.addEventListener('click',()=>{
     bg.remove();
-    location.href='/configuracoes#billing';
+    location.href='/assinatura';
   });
 }
 
@@ -675,6 +702,78 @@ async function initConfig(){
   await loadBilling();
 }
 
+
+async function initSubscription(){
+  await loadMe();
+  const data=await api('/api/billing/overview');
+  const org=data.organization||{},plans=data.plans||[];
+  const money=v=>Number(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+  const planNames={start:'Start',business:'Business',pro:'Pro'};
+  const billingLabels={authorized:'Ativa',pending:'Pendente',paused:'Pausada',cancelled:'Cancelada',inactive:'Sem assinatura'};
+  const trial=org.status==='trial';
+  const status=trial?'Trial':(billingLabels[org.billing_status]||org.billing_status||'Sem assinatura');
+  const plan=plans.find(p=>p.id===org.plan)||{};
+
+  $('#subscriptionSummary').innerHTML=`
+    <article class="metric-card"><div class="metric-top"><span>Plano atual</span></div><strong>${esc(planNames[org.plan]||String(org.plan||'—').toUpperCase())}</strong><small>${plan.price?money(plan.price)+'/mês':'Plano da empresa'}</small></article>
+    <article class="metric-card"><div class="metric-top"><span>Status</span></div><strong>${esc(status)}</strong><small>${trial&&data.trialDaysRemaining!==null?`${data.trialDaysRemaining} dia(s) de trial restantes`:'Situação da assinatura'}</small></article>
+    <article class="metric-card"><div class="metric-top"><span>Usuários</span></div><strong>${data.usersUsed||0}/${org.user_limit||0}</strong><small>Licenças em utilização</small></article>
+    <article class="metric-card"><div class="metric-top"><span>Próxima cobrança</span></div><strong style="font-size:17px">${org.next_payment_at?fmtShort(org.next_payment_at):'—'}</strong><small>${org.billing_email?esc(org.billing_email):'E-mail financeiro não informado'}</small></article>`;
+
+  $('#subscriptionDetails').innerHTML=`
+    <div class="subscription-detail"><span>Empresa</span><strong>${esc(org.name||'—')}</strong></div>
+    <div class="subscription-detail"><span>Início na plataforma</span><strong>${fmtShort(org.created_at)}</strong></div>
+    <div class="subscription-detail"><span>Fim do trial</span><strong>${fmtShort(org.trial_ends_at)}</strong></div>
+    <div class="subscription-detail"><span>Validade / fim da assinatura</span><strong>${fmtShort(org.subscription_ends_at)}</strong></div>
+    <div class="subscription-detail"><span>Último pagamento</span><strong>${fmt(org.last_payment_at)}</strong></div>
+    <div class="subscription-detail"><span>Atualização da cobrança</span><strong>${fmt(org.billing_updated_at)}</strong></div>
+    <div class="subscription-detail"><span>ID da assinatura</span><strong><code>${esc(org.mp_subscription_id||'—')}</code></strong></div>`;
+
+  $('#subscriptionPlans').innerHTML=plans.map(p=>`<article class="subscription-plan ${p.id===org.plan?'current':''}"><span class="eyebrow">${p.id===org.plan?'PLANO ATUAL':'PLANO'}</span><h3>${esc(p.name)}</h3><strong>${money(p.price)}<small>/mês</small></strong><p>Até ${p.userLimit} usuários na empresa.</p><button class="btn ${p.id===org.plan&&org.billing_status==='authorized'?'secondary':'primary'} billing-v9-subscribe" data-plan="${p.id}" ${p.id===org.plan&&org.billing_status==='authorized'?'disabled':''}>${p.id===org.plan&&org.billing_status==='authorized'?'Plano atual':p.id===org.plan?'Assinar este plano':'Escolher plano'}</button></article>`).join('');
+
+  $$('.billing-v9-subscribe').forEach(btn=>btn.onclick=async()=>{
+    const original=btn.textContent;btn.disabled=true;btn.textContent='Abrindo Mercado Pago...';
+    try{
+      const r=await api('/api/billing/subscribe',{method:'POST',body:JSON.stringify({plan:btn.dataset.plan,email:me.email||org.billing_email||''})});
+      if(!r.checkoutUrl)throw new Error('O Mercado Pago não retornou a URL do checkout.');
+      location.href=r.checkoutUrl;
+    }catch(err){btn.disabled=false;btn.textContent=original;toast(err.message,'error');}
+  });
+
+  if(new URLSearchParams(location.search).get('billing')==='return')toast('Retorno do Mercado Pago recebido. Atualizando dados da assinatura.');
+}
+
+const activityLabels={
+  ticket_created:'Chamado criado',ticket_updated:'Chamado alterado',ticket_deleted:'Chamado excluído',ticket_comment_added:'Comentário no chamado',
+  asset_created:'Ativo cadastrado',asset_updated:'Ativo alterado',asset_deleted:'Ativo excluído',
+  user_created:'Usuário criado',user_updated:'Usuário alterado',knowledge_created:'Artigo criado',knowledge_updated:'Artigo alterado',knowledge_deleted:'Artigo excluído',
+  settings_updated:'Configurações alteradas',billing_checkout_started:'Checkout iniciado',billing_authorized:'Assinatura autorizada',organization_created:'Empresa criada'
+};
+const activityTypeLabels={ticket:'Chamado',asset:'Ativo',user:'Usuário',knowledge:'Conhecimento',settings:'Configurações',billing:'Assinatura',organization:'Empresa'};
+function renderActivityDetails(log){
+  const details=log.details||{};
+  const changes=details.changes||{};
+  const changeRows=Object.entries(changes).map(([field,v])=>`<div class="change-row"><strong>${esc(field.replaceAll('_',' '))}</strong><span>${esc(v?.from??'—')}</span><b>→</b><span>${esc(v?.to??'—')}</span></div>`).join('');
+  const other=Object.entries(details).filter(([k])=>k!=='changes').map(([k,v])=>`<div class="subscription-detail"><span>${esc(k)}</span><strong>${esc(typeof v==='object'?JSON.stringify(v):v)}</strong></div>`).join('');
+  modal(`<div class="modal-head"><div><span class="eyebrow">AUDITORIA</span><h2>${esc(activityLabels[log.action]||log.action)}</h2><p>${esc(log.actor_name||'Sistema')} · ${fmt(log.created_at)}</p></div><button class="close" data-close>×</button></div><div class="activity-meta"><span>${esc(activityTypeLabels[log.target_type]||log.target_type)}</span>${log.target_id?`<code>#${log.target_id}</code>`:''}</div>${changeRows?`<div class="change-list">${changeRows}</div>`:''}${other?`<div class="subscription-details">${other}</div>`:''}${!changeRows&&!other?'<div class="empty-mini">Nenhum detalhe adicional registrado.</div>':''}`);
+}
+async function initActivity(){
+  await loadMe();
+  const load=async()=>{
+    const p=new URLSearchParams();
+    for(const [id,key] of [['activitySearch','q'],['activityActor','actor'],['activityType','type'],['activityAction','action'],['activityFrom','from'],['activityTo','to']]){const v=$('#'+id)?.value;if(v)p.set(key,v);}
+    const r=await api('/api/activity?'+p.toString());
+    if($('#activityActor')&&$('#activityActor').options.length<=1)$('#activityActor').innerHTML='<option value="">Todos os usuários</option>'+r.actors.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('');
+    $('#activityCount').textContent=`${r.logs.length} registro${r.logs.length===1?'':'s'}`;
+    $('#activityBody').innerHTML=r.logs.length?r.logs.map((l,i)=>`<tr data-activity="${i}"><td>${fmt(l.created_at)}</td><td><strong>${esc(l.actor_name||'Sistema')}</strong>${l.actor_username?`<small class="table-sub">@${esc(l.actor_username)}</small>`:''}</td><td>${esc(activityLabels[l.action]||l.action.replaceAll('_',' '))}</td><td><span class="pill">${esc(activityTypeLabels[l.target_type]||l.target_type)}</span>${l.target_id?` <code>#${l.target_id}</code>`:''}</td><td><button class="btn secondary small">Detalhes</button></td></tr>`).join(''):'<tr><td colspan="5"><div class="empty-state"><strong>Nenhuma atividade encontrada</strong><span>Ajuste os filtros para consultar outros registros.</span></div></td></tr>';
+    $$('[data-activity]').forEach(row=>row.onclick=()=>renderActivityDetails(r.logs[Number(row.dataset.activity)]));
+  };
+  await load();
+  ['activityActor','activityType','activityAction','activityFrom','activityTo'].forEach(id=>$('#'+id)?.addEventListener('change',load));
+  $('#activitySearch')?.addEventListener('input',()=>{clearTimeout(window.__activityTimer);window.__activityTimer=setTimeout(load,250)});
+  $('#activityClear')?.addEventListener('click',()=>{['activitySearch','activityActor','activityType','activityAction','activityFrom','activityTo'].forEach(id=>{if($('#'+id))$('#'+id).value=''});load()});
+}
+
 async function initPlatform(){
   localStorage.removeItem('activeOrganizationId');
   await loadMe();
@@ -700,4 +799,4 @@ function editOrganization(o,reload){
   const bg=modal(`<div class="modal-head"><div><span class="eyebrow">GESTÃO DO TENANT</span><h2>${esc(o.name)}</h2><p>${esc(o.slug)} · criado em ${fmtShort(o.created_at)}</p></div><button class="close" data-close>×</button></div><form id="editOrg"><div class="form-grid"><label class="field"><span>Nome</span><input name="name" value="${esc(o.name)}"></label><label class="field"><span>Plano</span><select name="plan">${['start','business','pro'].map(x=>`<option value="${x}" ${o.plan===x?'selected':''}>${x}</option>`).join('')}</select></label><label class="field"><span>Status</span><select name="status">${[['active','Ativa'],['trial','Trial'],['suspended','Suspensa']].map(([x,l])=>`<option value="${x}" ${o.status===x?'selected':''}>${l}</option>`).join('')}</select></label><label class="field"><span>Limite de usuários</span><input name="userLimit" type="number" value="${o.user_limit}"></label><label class="field"><span>Trial (dias)</span><input name="trialDays" type="number" min="0" max="90" value="${o.trial_days||0}"></label><label class="field"><span>Fim do trial</span><input name="trialEndsAt" type="date" value="${dateVal(o.trial_ends_at)}"></label><label class="field"><span>Fim da assinatura</span><input name="subscriptionEndsAt" type="date" value="${dateVal(o.subscription_ends_at)}"></label><label class="field"><span>E-mail financeiro</span><input name="billingEmail" type="email" value="${esc(o.billing_email||'')}"></label><label class="field"><span>Contato</span><input name="contactName" value="${esc(o.contact_name||'')}"></label><label class="field"><span>Telefone</span><input name="contactPhone" value="${esc(o.contact_phone||'')}"></label></div><label class="field"><span>Observações comerciais</span><textarea name="commercialNotes" rows="4">${esc(o.commercial_notes||'')}</textarea></label><div class="modal-actions"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn primary">Salvar alterações</button></div></form>`,true);
   $('#editOrg').onsubmit=async e=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));await api('/api/platform/organizations/'+o.id,{method:'PATCH',body:JSON.stringify(d)});bg.remove();toast('Empresa atualizada.');reload()}catch(err){toast(err.message,'error')}};
 }
-document.addEventListener('DOMContentLoaded',async()=>{try{const p=document.body.dataset.page;const pages={login:initLogin,register:initRegister,dashboard:initDashboard,tickets:initTickets,assets:initAssets,knowledge:initKnowledge,users:initUsers,reports:initReports,config:initConfig,platform:initPlatform};const init=pages[p];if(typeof init==='function')await init()}catch(e){console.error(e);feedback(e.message,'error');toast(e.message,'error')}});
+document.addEventListener('DOMContentLoaded',async()=>{try{const p=document.body.dataset.page;const pages={login:initLogin,register:initRegister,dashboard:initDashboard,tickets:initTickets,assets:initAssets,knowledge:initKnowledge,users:initUsers,reports:initReports,activity:initActivity,subscription:initSubscription,config:initConfig,platform:initPlatform};const init=pages[p];if(typeof init==='function')await init()}catch(e){console.error(e);feedback(e.message,'error');toast(e.message,'error')}});
