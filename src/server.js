@@ -120,19 +120,33 @@ const BILLING_PLANS = {
   }
 };
 
-async function mercadoPagoRequest(apiPath, options = {}) {
-  if (!process.env.MP_ACCESS_TOKEN) {
-    const error = new Error('Mercado Pago não configurado.');
+function mercadoPagoAccessToken() {
+  const mode = String(process.env.MP_MODE || 'production').toLowerCase();
+  const token = mode === 'test'
+    ? process.env.MP_TEST_ACCESS_TOKEN
+    : process.env.MP_ACCESS_TOKEN;
+
+  if (!token) {
+    const error = new Error(
+      mode === 'test'
+        ? 'MP_TEST_ACCESS_TOKEN não configurado.'
+        : 'MP_ACCESS_TOKEN não configurado.'
+    );
     error.status = 503;
     throw error;
   }
+  return token;
+}
+
+async function mercadoPagoRequest(apiPath, options = {}) {
+  const accessToken = mercadoPagoAccessToken();
 
   const response = await fetch(
     `https://api.mercadopago.com${apiPath}`,
     {
       ...options,
       headers: {
-        Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         ...(options.headers || {})
       }
@@ -222,16 +236,39 @@ app.post(
       });
     }
 
+    const mpMode =
+      String(process.env.MP_MODE || 'production').toLowerCase();
+
+    /*
+      Em teste, o pagador deve ser uma conta de teste COMPRADOR
+      diferente da conta de teste VENDEDOR dona das credenciais.
+
+      Render (teste):
+      MP_MODE=test
+      MP_TEST_ACCESS_TOKEN=TEST-...
+      MP_TEST_PAYER_EMAIL=email_da_conta_teste_comprador
+
+      Render (produção):
+      MP_MODE=production
+      MP_ACCESS_TOKEN=APP_USR-...
+    */
     const payerEmail = clean(
-      req.body.email ||
-      organization.billing_email ||
-      req.user.email,
+      mpMode === 'test'
+        ? process.env.MP_TEST_PAYER_EMAIL
+        : (
+            req.body.email ||
+            organization.billing_email ||
+            req.user.email
+          ),
       160
     );
 
     if (!payerEmail) {
       return res.status(400).json({
-        error: 'Informe um e-mail de cobrança.'
+        error:
+          mpMode === 'test'
+            ? 'Configure MP_TEST_PAYER_EMAIL com o e-mail da conta de teste COMPRADOR.'
+            : 'Informe um e-mail de cobrança.'
       });
     }
 
