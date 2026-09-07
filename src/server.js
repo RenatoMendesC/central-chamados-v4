@@ -18,7 +18,7 @@ const canSee=(u,t)=>u.role!=='requester'||Number(t.requester_id)===Number(u.id);
 app.get('/',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect(u.is_super_admin?'/plataforma':'/dashboard');res.sendFile(page('index.html'));});
 app.get('/apresentacao',(req,res)=>res.sendFile(page('apresentacao.html')));
 app.get('/criar-conta',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect('/dashboard');res.sendFile(page('criar-conta.html'));});
-for(const [url,file,roles] of [['/dashboard','dashboard.html',[]],['/chamados','chamados.html',[]],['/ativos','ativos.html',['admin','agent']],['/base-conhecimento','base-conhecimento.html',[]],['/relatorios','relatorios.html',['admin']],['/usuarios','usuarios.html',['admin']],['/configuracoes','configuracoes.html',['admin']]])app.get(url,requireAuth,...(roles.length?[requireRole(...roles)]:[]),(req,res)=>res.sendFile(page(file)));
+for(const [url,file,roles] of [['/dashboard','dashboard.html',[]],['/chamados','chamados.html',[]],['/ativos','ativos.html',['admin','agent']],['/base-conhecimento','base-conhecimento.html',[]],['/relatorios','relatorios.html',['admin']],['/usuarios','usuarios.html',['admin']],['/configuracoes','configuracoes.html',[]]])app.get(url,requireAuth,...(roles.length?[requireRole(...roles)]:[]),(req,res)=>res.sendFile(page(file)));
 app.get('/plataforma',requireAuth,requireSuperAdmin,(req,res)=>res.sendFile(page('plataforma.html')));
 
 // Auth + invitation-only signup
@@ -232,7 +232,6 @@ app.get(
 app.post(
   '/api/billing/subscribe',
   requireAuth,
-  requireRole('admin'),
   async (req, res) => {
 
     const organizationId = tenant(req);
