@@ -157,8 +157,8 @@ const BILLING_PLANS = {
   start: {
     id: 'start',
     name: 'Start',
-    price: 1,
-    priceCents: 100,
+    price: 10,
+    priceCents: 1000,
     userLimit: 5
   },
   business: {
@@ -935,5 +935,6 @@ app.post('/api/billing/webhook', async (req, res) => {
 
 app.get('/health',(req,res)=>res.json({ok:true,version:'9.0.0',mode:'multi-tenant-saas',time:new Date().toISOString()}));app.use('/api',(req,res)=>res.status(404).json({error:'Rota nÃ£o encontrada.'}));app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Erro interno do servidor.'});});
 initDatabase().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`Central de ServiÃ§os V8 Clean em http://localhost:${PORT}`))).catch(e=>{console.error('Falha ao iniciar:',e);process.exit(1);});
+
 
 
