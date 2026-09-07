@@ -272,8 +272,8 @@ app.get(
 app.post(
   '/api/billing/subscribe',
   requireAuth,
+  requireRole('admin'),
   async (req, res) => {
-
     const organizationId = tenant(req);
 
     const planId = clean(
@@ -306,60 +306,14 @@ app.post(
       });
     }
 
-    const mpMode =
-      String(process.env.MP_MODE || 'production').toLowerCase();
-
     /*
-      Em teste, o pagador deve ser uma conta de teste COMPRADOR
-      diferente da conta de teste VENDEDOR dona das credenciais.
+      NOVO FLUXO:
+      Em vez de criar uma assinatura diretamente em /preapproval,
+      criamos/reutilizamos um plano em /preapproval_plan e devolvemos
+      o init_point do próprio Mercado Pago.
 
-      Render (teste):
-      MP_MODE=test
-      MP_TEST_ACCESS_TOKEN=TEST-...
-      MP_TEST_PAYER_EMAIL=email_da_conta_teste_comprador
-
-      Render (produção):
-      MP_MODE=production
-      MP_ACCESS_TOKEN=APP_USR-...
-    */
-    /*
-      O Mercado Pago NÃO permite que pagador e recebedor sejam o mesmo usuário.
-
-      Em TESTE:
-      - MP_TEST_ACCESS_TOKEN = credencial da conta teste VENDEDOR
-      - MP_TEST_PAYER_EMAIL = e-mail da conta teste COMPRADOR
-      - comprador e vendedor precisam ser usuários diferentes
-
-      Se o front-end enviar um e-mail explicitamente, ele tem prioridade.
-    */
-    const payerEmail = clean(
-      req.body.email ||
-      (
-        mpMode === 'test'
-          ? process.env.MP_TEST_PAYER_EMAIL
-          : (
-              organization.billing_email ||
-              req.user.email
-            )
-      ),
-      160
-    );
-
-    if (!payerEmail) {
-      return res.status(400).json({
-        error:
-          mpMode === 'test'
-            ? 'Configure MP_TEST_PAYER_EMAIL com o e-mail de uma conta de teste COMPRADOR diferente da conta VENDEDOR.'
-            : 'Informe um e-mail de cobrança.'
-      });
-    }
-
-    /*
-      IMPORTANTE:
-      não usamos localhost aqui.
-
-      APP_URL no Render:
-      https://central-chamados-v4.onrender.com
+      O comprador escolhe o meio de pagamento no checkout do Mercado Pago.
+      Isso evita exigir card_token_id no nosso backend.
     */
 
     const baseUrl = String(
@@ -370,24 +324,47 @@ app.post(
     const backUrl =
       `${baseUrl}/assinatura?billing=return`;
 
-    const externalReference =
-      `org:${organizationId}:plan:${planId}`;
+    /*
+      IDs podem ser configurados no Render para evitar criar planos repetidos.
+      Ex.:
+        MP_PLAN_STARTER_ID
+        MP_PLAN_PRO_ID
+        MP_PLAN_BUSINESS_ID
 
-    const subscription =
-      await mercadoPagoRequest(
-        '/preapproval',
+      Se o ID não existir, o backend cria o plano automaticamente.
+    */
+    const envPlanKey =
+      `MP_PLAN_${planId.toUpperCase()}_ID`;
+
+    let mpPlanId = clean(
+      process.env[envPlanKey],
+      120
+    );
+
+    let mpPlan = null;
+
+    if (mpPlanId) {
+      try {
+        mpPlan = await mercadoPagoRequest(
+          `/preapproval_plan/${encodeURIComponent(mpPlanId)}`
+        );
+      } catch (error) {
+        console.warn(
+          `Plano Mercado Pago ${mpPlanId} não pôde ser consultado; será recriado.`,
+          error.message
+        );
+        mpPlanId = '';
+      }
+    }
+
+    if (!mpPlanId) {
+      mpPlan = await mercadoPagoRequest(
+        '/preapproval_plan',
         {
           method: 'POST',
-
           body: JSON.stringify({
             reason:
               `Central de Serviços - Plano ${plan.name}`,
-
-            external_reference:
-              externalReference,
-
-            payer_email:
-              payerEmail,
 
             auto_recurring: {
               frequency: 1,
@@ -396,55 +373,84 @@ app.post(
               currency_id: 'BRL'
             },
 
-            back_url: backUrl,
-
-            /*
-              O checkout começa pendente e o comprador escolhe
-              o meio de pagamento pelo init_point retornado.
-            */
-            status: 'pending'
+            back_url: backUrl
           })
         }
       );
 
+      mpPlanId = mpPlan.id || '';
+
+      if (!mpPlanId) {
+        throw new Error(
+          'Mercado Pago não retornou o ID do plano.'
+        );
+      }
+
+      console.log(
+        `[BILLING] Plano ${planId} criado no Mercado Pago: ${mpPlanId}. ` +
+        `Adicione ${envPlanKey}=${mpPlanId} no Render para reutilizá-lo.`
+      );
+    }
+
+    /*
+      GET /preapproval_plan/{id} e POST /preapproval_plan retornam init_point.
+      Se por algum motivo a primeira resposta não trouxer, consultamos novamente.
+    */
+    if (!mpPlan?.init_point) {
+      mpPlan = await mercadoPagoRequest(
+        `/preapproval_plan/${encodeURIComponent(mpPlanId)}`
+      );
+    }
+
+    const checkoutUrl =
+      mpPlan?.init_point || null;
+
+    if (!checkoutUrl) {
+      throw new Error(
+        'Mercado Pago criou o plano, mas não retornou o link de checkout.'
+      );
+    }
+
+    /*
+      Ainda não existe uma assinatura individual neste momento.
+      Ela será criada pelo Mercado Pago quando o comprador concluir
+      o checkout do plano.
+    */
     await query(
       `
       UPDATE organizations
       SET
-        billing_email=$1,
-        mp_subscription_id=$2,
-        billing_status=$3,
+        billing_status='pending',
         billing_updated_at=NOW(),
         updated_at=NOW()
-      WHERE id=$4
+      WHERE id=$1
       `,
-      [
-        payerEmail,
-        subscription.id || null,
-        subscription.status || 'pending',
-        organizationId
-      ]
+      [organizationId]
     );
 
-    await audit(req,'billing_checkout_started','billing',organizationId,{plan:planId,subscriptionId:subscription.id||null,status:subscription.status||'pending'});
+    await audit(
+      req,
+      'billing_checkout_started',
+      'billing',
+      organizationId,
+      {
+        plan: planId,
+        mpPlanId,
+        status: 'pending'
+      }
+    );
 
     res.status(201).json({
       ok: true,
-
-      subscriptionId:
-        subscription.id || null,
-
-      status:
-        subscription.status || 'pending',
-
-      checkoutUrl:
-        subscription.init_point || null,
-
-      plan: planId
+      subscriptionId: null,
+      mpPlanId,
+      status: 'pending',
+      checkoutUrl,
+      plan: planId,
+      envPlanKey
     });
   }
 );
-
 
 /* --------------------------------------------
    CONSULTAR ASSINATURA
