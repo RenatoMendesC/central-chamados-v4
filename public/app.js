@@ -132,7 +132,6 @@ function showTrialWelcome(){
   sessionStorage.setItem(sessionKey,'1');
 
   const isAdmin=me?.role==='admin';
-
   const title=info.expired
     ? 'Seu período de teste terminou'
     : 'Seu período de teste está ativo';
@@ -168,10 +167,7 @@ function showTrialWelcome(){
 
     <div class="modal-actions" style="margin-top:22px;">
       <button type="button" class="btn ghost" data-close>Fechar</button>
-      ${isAdmin
-        ? '<button type="button" class="btn primary" id="trialSubscribeNow">Assinar agora</button>'
-        : ''
-      }
+      <button type="button" class="btn primary" id="trialSubscribeNow">Assinar agora</button>
     </div>
   `);
 
