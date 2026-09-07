@@ -322,14 +322,26 @@ app.post(
       MP_MODE=production
       MP_ACCESS_TOKEN=APP_USR-...
     */
+    /*
+      O Mercado Pago NÃO permite que pagador e recebedor sejam o mesmo usuário.
+
+      Em TESTE:
+      - MP_TEST_ACCESS_TOKEN = credencial da conta teste VENDEDOR
+      - MP_TEST_PAYER_EMAIL = e-mail da conta teste COMPRADOR
+      - comprador e vendedor precisam ser usuários diferentes
+
+      Se o front-end enviar um e-mail explicitamente, ele tem prioridade.
+    */
     const payerEmail = clean(
-      mpMode === 'test'
-        ? process.env.MP_TEST_PAYER_EMAIL
-        : (
-            req.body.email ||
-            organization.billing_email ||
-            req.user.email
-          ),
+      req.body.email ||
+      (
+        mpMode === 'test'
+          ? process.env.MP_TEST_PAYER_EMAIL
+          : (
+              organization.billing_email ||
+              req.user.email
+            )
+      ),
       160
     );
 
@@ -337,7 +349,7 @@ app.post(
       return res.status(400).json({
         error:
           mpMode === 'test'
-            ? 'Configure MP_TEST_PAYER_EMAIL com o e-mail da conta de teste COMPRADOR.'
+            ? 'Configure MP_TEST_PAYER_EMAIL com o e-mail de uma conta de teste COMPRADOR diferente da conta VENDEDOR.'
             : 'Informe um e-mail de cobrança.'
       });
     }
@@ -384,7 +396,13 @@ app.post(
               currency_id: 'BRL'
             },
 
-            back_url: backUrl
+            back_url: backUrl,
+
+            /*
+              O checkout começa pendente e o comprador escolhe
+              o meio de pagamento pelo init_point retornado.
+            */
+            status: 'pending'
           })
         }
       );
