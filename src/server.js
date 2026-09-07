@@ -411,6 +411,22 @@ app.post(
       );
     }
 
+    await ensureBillingCheckoutMap();
+
+    await query(
+      `
+      INSERT INTO billing_checkout_map
+        (mp_plan_id, organization_id, plan_id, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (mp_plan_id)
+      DO UPDATE SET
+        organization_id=EXCLUDED.organization_id,
+        plan_id=EXCLUDED.plan_id,
+        updated_at=NOW()
+      `,
+      [mpPlanId, organizationId, planId]
+    );
+
     /*
       Ainda não existe uma assinatura individual neste momento.
       Ela será criada pelo Mercado Pago quando o comprador concluir
@@ -557,6 +573,22 @@ app.get(
 
 
 /* --------------------------------------------
+   MAPA CHECKOUT MP -> EMPRESA/PLANO
+   -------------------------------------------- */
+
+async function ensureBillingCheckoutMap() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS billing_checkout_map (
+      mp_plan_id VARCHAR(120) PRIMARY KEY,
+      organization_id INTEGER NOT NULL,
+      plan_id VARCHAR(30) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+/* --------------------------------------------
    SINCRONIZAR ASSINATURA
    -------------------------------------------- */
 
@@ -577,30 +609,72 @@ async function syncMercadoPagoSubscription(
       subscription.external_reference || ''
     );
 
-  /*
-    Formato:
-    org:1:plan:business
-  */
+  let organizationId = null;
+  let planId = null;
 
+  /*
+    Compatibilidade com o fluxo antigo:
+    external_reference = org:1:plan:business
+  */
   const match =
     reference.match(
       /^org:(\d+):plan:(start|business|pro)$/
     );
 
-  if (!match) {
-    console.warn(
-      'Assinatura sem referência reconhecida:',
-      reference
-    );
-
-    return;
+  if (match) {
+    organizationId = Number(match[1]);
+    planId = match[2];
   }
 
-  const organizationId =
-    Number(match[1]);
+  /*
+    Fluxo novo com preapproval_plan:
+    o Mercado Pago informa preapproval_plan_id na assinatura.
+    Usamos o mapa salvo quando o checkout foi iniciado.
+  */
+  if (!organizationId || !planId) {
+    const mpPlanId =
+      String(
+        subscription.preapproval_plan_id ||
+        subscription.preapproval_plan?.id ||
+        ''
+      );
 
-  const planId =
-    match[2];
+    if (mpPlanId) {
+      await ensureBillingCheckoutMap();
+
+      const mapped = (
+        await query(
+          `
+          SELECT organization_id, plan_id
+          FROM billing_checkout_map
+          WHERE mp_plan_id=$1
+          LIMIT 1
+          `,
+          [mpPlanId]
+        )
+      ).rows[0];
+
+      if (mapped) {
+        organizationId = Number(mapped.organization_id);
+        planId = String(mapped.plan_id);
+      }
+    }
+  }
+
+  if (!organizationId || !planId) {
+    console.warn(
+      '[Mercado Pago] Não foi possível associar a assinatura à empresa.',
+      {
+        subscriptionId: subscription.id,
+        externalReference: reference || null,
+        preapprovalPlanId:
+          subscription.preapproval_plan_id ||
+          subscription.preapproval_plan?.id ||
+          null
+      }
+    );
+    return;
+  }
 
   const plan =
     BILLING_PLANS[planId];
