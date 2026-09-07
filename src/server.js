@@ -751,28 +751,33 @@ function validateMercadoPagoWebhook(req) {
 }
 
 app.post('/api/billing/webhook', async (req, res) => {
+  const type =
+    req.body?.type ||
+    req.body?.topic ||
+    req.query?.type ||
+    req.query?.topic ||
+    '';
+
+  const dataId =
+    req.body?.data?.id ||
+    req.query?.['data.id'] ||
+    req.query?.id ||
+    req.body?.id ||
+    null;
+
+  /*
+    Log ANTES da resposta para ficar visível no Render inclusive
+    durante a simulação de Webhook do painel do Mercado Pago.
+    Nunca registramos Access Token ou outros segredos.
+  */
+  console.log(
+    `[MP WEBHOOK RECEBIDO] type=${type || 'sem-tipo'} id=${dataId || 'sem-id'}`
+  );
+
   // Confirma rapidamente o recebimento para o Mercado Pago.
   res.status(200).json({ received: true });
 
   try {
-    const type =
-      req.body?.type ||
-      req.body?.topic ||
-      req.query?.type ||
-      req.query?.topic ||
-      '';
-
-    const dataId =
-      req.body?.data?.id ||
-      req.query?.['data.id'] ||
-      req.query?.id ||
-      req.body?.id ||
-      null;
-
-    console.log('[Mercado Pago Webhook]', {
-      type,
-      dataId
-    });
 
     const signature = validateMercadoPagoWebhook(req);
 
