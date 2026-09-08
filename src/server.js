@@ -1,4 +1,4 @@
-require('dotenv').config();
+﻿require('dotenv').config();
 const path=require('path'),express=require('express'),cookieParser=require('cookie-parser'),helmet=require('helmet'),bcrypt=require('bcryptjs'),rateLimit=require('express-rate-limit'),crypto=require('crypto');
 const {query}=require('./db'); const {initDatabase}=require('./schema'); const {setAuthCookie,clearAuthCookie,loadUser,requireAuth,requireRole,requireSuperAdmin}=require('./auth');
 if(!process.env.DATABASE_URL)throw new Error('DATABASE_URL não configurada.'); if(!process.env.JWT_SECRET||process.env.JWT_SECRET.length<20)throw new Error('JWT_SECRET precisa ter pelo menos 20 caracteres.');
@@ -769,6 +769,33 @@ app.post(
       const organizationId = tenant(req);
       await ensureBillingCheckoutMap();
 
+      // CORRECAO TEMPORARIA - vincula o pagamento ja realizado
+      if (Number(organizationId) === 1) {
+        await query(
+          `DELETE FROM billing_checkout_map
+           WHERE organization_id=$1 AND plan_id=$2`,
+          [organizationId, 'start']
+        );
+
+        await query(
+          `INSERT INTO billing_checkout_map
+             (mp_plan_id, organization_id, plan_id, updated_at)
+           VALUES ($1, $2, $3, NOW())
+           ON CONFLICT (mp_plan_id)
+           DO UPDATE SET
+             organization_id=EXCLUDED.organization_id,
+             plan_id=EXCLUDED.plan_id,
+             updated_at=NOW()`,
+          [
+            'cd6add83d4ae4ba891a18b880dfdfb4a',
+            organizationId,
+            'start'
+          ]
+        );
+
+        console.log('[BILLING SYNC] Mapeamento temporario corrigido para org=1/start');
+      }
+
       const mappings = (
         await query(
           `SELECT mp_plan_id, plan_id
@@ -1024,3 +1051,4 @@ app.post('/api/billing/webhook', async (req, res) => {
 
 app.get('/health',(req,res)=>res.json({ok:true,version:'9.0.0',mode:'multi-tenant-saas',time:new Date().toISOString()}));app.use('/api',(req,res)=>res.status(404).json({error:'Rota não encontrada.'}));app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Erro interno do servidor.'});});
 initDatabase().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`Central de Serviços V8 Clean em http://localhost:${PORT}`))).catch(e=>{console.error('Falha ao iniciar:',e);process.exit(1);});
+
