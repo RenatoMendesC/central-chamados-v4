@@ -769,14 +769,7 @@ app.post(
           error: 'Nenhum checkout de assinatura encontrado para esta empresa.'
         });
       }
-
-      const expectedPayerEmail = String(
-        process.env.MP_MODE === 'test'
-          ? process.env.MP_TEST_PAYER_EMAIL || ''
-          : ''
-      ).trim().toLowerCase();
-
-      for (const mapping of mappings) {
+for (const mapping of mappings) {
         const search = await mercadoPagoRequest(
           `/preapproval/search?preapproval_plan_id=${encodeURIComponent(mapping.mp_plan_id)}&limit=20`
         );
@@ -787,15 +780,9 @@ app.post(
           new Date(a.last_modified || a.date_created || 0).getTime()
         );
 
-        const candidate = subscriptions.find((subscription) => {
-          if (!subscription?.id) return false;
-          if (
-            expectedPayerEmail &&
-            subscription.payer_email &&
-            String(subscription.payer_email).trim().toLowerCase() !== expectedPayerEmail
-          ) return false;
-          return true;
-        });
+        const candidate = subscriptions.find(
+          (subscription) => subscription?.id
+        );
 
         if (!candidate) continue;
 
