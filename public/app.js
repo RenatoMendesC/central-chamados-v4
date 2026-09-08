@@ -779,15 +779,124 @@ async function initSubscription(){
   $('#subscriptionPlans').innerHTML=plans.map(p=>`<article class="subscription-plan ${p.id===org.plan?'current':''}"><span class="eyebrow">${p.id===org.plan?'PLANO ATUAL':'PLANO'}</span><h3>${esc(p.name)}</h3><strong>${money(p.price)}<small>/mês</small></strong><p>Até ${p.userLimit} usuários na empresa.</p><button class="btn ${p.id===org.plan&&org.billing_status==='authorized'?'secondary':'primary'} billing-v9-subscribe" data-plan="${p.id}" ${p.id===org.plan&&org.billing_status==='authorized'?'disabled':''}>${p.id===org.plan&&org.billing_status==='authorized'?'Plano atual':p.id===org.plan?'Assinar este plano':'Escolher plano'}</button></article>`).join('');
 
   $$('.billing-v9-subscribe').forEach(btn=>btn.onclick=async()=>{
-    const original=btn.textContent;btn.disabled=true;btn.textContent='Abrindo Mercado Pago...';
+    const original=btn.textContent;
+    btn.disabled=true;
+    btn.textContent='Abrindo Mercado Pago...';
+
     try{
-      const r=await api('/api/billing/subscribe',{method:'POST',body:JSON.stringify({plan:btn.dataset.plan,email:me.email||org.billing_email||''})});
-      if(!r.checkoutUrl)throw new Error('O Mercado Pago não retornou a URL do checkout.');
+      const r=await api('/api/billing/subscribe',{
+        method:'POST',
+        body:JSON.stringify({
+          plan:btn.dataset.plan,
+          email:me.email||org.billing_email||''
+        })
+      });
+
+      if(!r.checkoutUrl){
+        throw new Error('O Mercado Pago não retornou a URL do checkout.');
+      }
+
       location.href=r.checkoutUrl;
-    }catch(err){btn.disabled=false;btn.textContent=original;toast(err.message,'error');}
+    }catch(err){
+      btn.disabled=false;
+      btn.textContent=original;
+      toast(err.message,'error');
+    }
   });
 
-  if(new URLSearchParams(location.search).get('billing')==='return')toast('Retorno do Mercado Pago recebido. Atualizando dados da assinatura.');
+  /* AÇÕES DA ASSINATURA */
+  const details=$('#subscriptionDetails');
+
+  if(details && me.role==='admin'){
+    const actions=document.createElement('div');
+
+    actions.style.cssText=`
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:18px;
+      padding-top:18px;
+      border-top:1px solid var(--border);
+    `;
+
+    const canCancel=
+      Boolean(org.mp_subscription_id) &&
+      ['authorized','paused','pending'].includes(org.billing_status);
+
+    actions.innerHTML=`
+      <button class="btn secondary" id="billingSyncBtn">
+        Atualizar assinatura
+      </button>
+
+      ${canCancel?`
+        <button class="btn danger" id="billingCancelBtn">
+          Cancelar assinatura
+        </button>
+      `:''}
+    `;
+
+    details.appendChild(actions);
+
+    const syncBtn=$('#billingSyncBtn');
+
+    if(syncBtn){
+      syncBtn.onclick=async()=>{
+        const original=syncBtn.textContent;
+
+        syncBtn.disabled=true;
+        syncBtn.textContent='Atualizando...';
+
+        try{
+          await api('/api/billing/sync',{
+            method:'POST'
+          });
+
+          toast('Assinatura atualizada com sucesso.');
+          setTimeout(()=>location.reload(),500);
+
+        }catch(err){
+          syncBtn.disabled=false;
+          syncBtn.textContent=original;
+          toast(err.message,'error');
+        }
+      };
+    }
+
+    const cancelBtn=$('#billingCancelBtn');
+
+    if(cancelBtn){
+      cancelBtn.onclick=async()=>{
+        const confirmed=confirm(
+          'Tem certeza que deseja cancelar esta assinatura?\n\nA cobrança recorrente será cancelada no Mercado Pago.'
+        );
+
+        if(!confirmed)return;
+
+        const original=cancelBtn.textContent;
+
+        cancelBtn.disabled=true;
+        cancelBtn.textContent='Cancelando...';
+
+        try{
+          await api('/api/billing/cancel',{
+            method:'POST'
+          });
+
+          toast('Assinatura cancelada com sucesso.');
+          setTimeout(()=>location.reload(),700);
+
+        }catch(err){
+          cancelBtn.disabled=false;
+          cancelBtn.textContent=original;
+          toast(err.message,'error');
+        }
+      };
+    }
+  }
+
+  if(new URLSearchParams(location.search).get('billing')==='return'){
+    toast('Retorno do Mercado Pago recebido. Atualizando dados da assinatura.');
+  }
 }
 
 const activityLabels={
