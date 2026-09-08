@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const path=require('path'),express=require('express'),cookieParser=require('cookie-parser'),helmet=require('helmet'),bcrypt=require('bcryptjs'),rateLimit=require('express-rate-limit'),crypto=require('crypto');
 const {query}=require('./db'); const {initDatabase}=require('./schema'); const {setAuthCookie,clearAuthCookie,loadUser,requireAuth,requireRole,requireSuperAdmin}=require('./auth');
 if(!process.env.DATABASE_URL)throw new Error('DATABASE_URL não configurada.'); if(!process.env.JWT_SECRET||process.env.JWT_SECRET.length<20)throw new Error('JWT_SECRET precisa ter pelo menos 20 caracteres.');
@@ -234,6 +234,19 @@ async function mercadoPagoRequest(apiPath, options = {}) {
 
 
 
+async function ensureBillingCheckoutMap() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS billing_checkout_map (
+      mp_plan_id VARCHAR(120) PRIMARY KEY,
+      organization_id INTEGER NOT NULL,
+      plan_id VARCHAR(30) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+
 /* --------------------------------------------
    V9 - VISÃO LOCAL DA ASSINATURA
    -------------------------------------------- */
@@ -413,32 +426,22 @@ app.post(
 
     await ensureBillingCheckoutMap();
 
-    /*
-      Mantém apenas o plano atual do Mercado Pago para esta empresa + plano.
-      Remove IDs antigos que poderiam fazer o /api/billing/sync procurar
-      a assinatura no preapproval_plan errado.
-    */
+    // Mantém somente o plano atual desta empresa para este produto.
     await query(
-      `
-      DELETE FROM billing_checkout_map
-      WHERE organization_id=$1
-        AND plan_id=$2
-        AND mp_plan_id<>$3
-      `,
+      `DELETE FROM billing_checkout_map
+       WHERE organization_id=$1 AND plan_id=$2 AND mp_plan_id<>$3`,
       [organizationId, planId, mpPlanId]
     );
 
     await query(
-      `
-      INSERT INTO billing_checkout_map
-        (mp_plan_id, organization_id, plan_id, updated_at)
-      VALUES ($1, $2, $3, NOW())
-      ON CONFLICT (mp_plan_id)
-      DO UPDATE SET
-        organization_id=EXCLUDED.organization_id,
-        plan_id=EXCLUDED.plan_id,
-        updated_at=NOW()
-      `,
+      `INSERT INTO billing_checkout_map
+         (mp_plan_id, organization_id, plan_id, updated_at)
+       VALUES ($1,$2,$3,NOW())
+       ON CONFLICT (mp_plan_id)
+       DO UPDATE SET
+         organization_id=EXCLUDED.organization_id,
+         plan_id=EXCLUDED.plan_id,
+         updated_at=NOW()`,
       [mpPlanId, organizationId, planId]
     );
 
@@ -588,139 +591,90 @@ app.get(
 
 
 /* --------------------------------------------
-   MAPA CHECKOUT MP -> EMPRESA/PLANO
-   -------------------------------------------- */
-
-async function ensureBillingCheckoutMap() {
-  await query(`
-    CREATE TABLE IF NOT EXISTS billing_checkout_map (
-      mp_plan_id VARCHAR(120) PRIMARY KEY,
-      organization_id INTEGER NOT NULL,
-      plan_id VARCHAR(30) NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-}
-
-/* --------------------------------------------
    SINCRONIZAR ASSINATURA
    -------------------------------------------- */
 
-async function syncMercadoPagoSubscription(
-  subscriptionId
-) {
-  if (!subscriptionId) return;
+async function syncMercadoPagoSubscription(subscriptionId) {
+  if (!subscriptionId) return null;
 
-  const subscription =
-    await mercadoPagoRequest(
-      `/preapproval/${encodeURIComponent(
-        subscriptionId
-      )}`
-    );
-
-  const reference =
-    String(
-      subscription.external_reference || ''
-    );
+  const subscription = await mercadoPagoRequest(
+    `/preapproval/${encodeURIComponent(subscriptionId)}`
+  );
 
   let organizationId = null;
   let planId = null;
 
-  /*
-    Compatibilidade com o fluxo antigo:
-    external_reference = org:1:plan:business
-  */
-  const match =
-    reference.match(
-      /^org:(\d+):plan:(start|business|pro)$/
-    );
+  // 1) Fluxo ideal: assinatura com external_reference.
+  const reference = String(subscription.external_reference || '');
+  const match = reference.match(/^org:(\d+):plan:(start|business|pro)$/);
 
   if (match) {
     organizationId = Number(match[1]);
     planId = match[2];
   }
 
-  /*
-    Fluxo novo com preapproval_plan:
-    o Mercado Pago informa preapproval_plan_id na assinatura.
-    Usamos o mapa salvo quando o checkout foi iniciado.
-  */
-  if (!organizationId || !planId) {
-    const mpPlanId =
-      String(
-        subscription.preapproval_plan_id ||
-        subscription.preapproval_plan?.id ||
-        ''
-      );
+  // 2) Checkout hospedado por preapproval_plan: resolve pelo mapeamento local.
+  if (!organizationId && subscription.preapproval_plan_id) {
+    await ensureBillingCheckoutMap();
+    const mapped = (
+      await query(
+        `SELECT organization_id, plan_id
+         FROM billing_checkout_map
+         WHERE mp_plan_id=$1
+         LIMIT 1`,
+        [String(subscription.preapproval_plan_id)]
+      )
+    ).rows[0];
 
-    if (mpPlanId) {
-      await ensureBillingCheckoutMap();
-
-      const mapped = (
-        await query(
-          `
-          SELECT organization_id, plan_id
-          FROM billing_checkout_map
-          WHERE mp_plan_id=$1
-          LIMIT 1
-          `,
-          [mpPlanId]
-        )
-      ).rows[0];
-
-      if (mapped) {
-        organizationId = Number(mapped.organization_id);
-        planId = String(mapped.plan_id);
-      }
+    if (mapped) {
+      organizationId = Number(mapped.organization_id);
+      planId = mapped.plan_id;
     }
   }
 
-  if (!organizationId || !planId) {
-    console.warn(
-      '[Mercado Pago] Não foi possível associar a assinatura à empresa.',
-      {
-        subscriptionId: subscription.id,
-        externalReference: reference || null,
-        preapprovalPlanId:
-          subscription.preapproval_plan_id ||
-          subscription.preapproval_plan?.id ||
-          null
-      }
-    );
-    return;
+  // 3) Renovação/status de uma assinatura que já está vinculada à empresa.
+  if (!organizationId) {
+    const existing = (
+      await query(
+        `SELECT id, plan
+         FROM organizations
+         WHERE mp_subscription_id=$1
+         LIMIT 1`,
+        [String(subscription.id)]
+      )
+    ).rows[0];
+
+    if (existing) {
+      organizationId = Number(existing.id);
+      planId = existing.plan;
+    }
   }
 
-  const plan =
-    BILLING_PLANS[planId];
+  if (!organizationId || !BILLING_PLANS[planId]) {
+    console.warn('[Mercado Pago] Não foi possível vincular assinatura à empresa:', {
+      subscriptionId: subscription.id,
+      preapprovalPlanId: subscription.preapproval_plan_id || null,
+      externalReference: reference || null
+    });
+    return null;
+  }
 
-  if (!plan) return;
-
-  const mpStatus =
-    subscription.status || 'pending';
-
-  /*
-    Só liberamos efetivamente o plano quando
-    o Mercado Pago informar que a assinatura
-    está autorizada.
-  */
+  const plan = BILLING_PLANS[planId];
+  const mpStatus = subscription.status || 'pending';
 
   if (mpStatus === 'authorized') {
-
     await query(
-      `
-      UPDATE organizations
-      SET
-        plan=$1,
-        user_limit=$2,
-        status='active',
-        mp_subscription_id=$3,
-        billing_status=$4,
-        next_payment_at=$5,
-        billing_updated_at=NOW(),
-        updated_at=NOW()
-      WHERE id=$6
-      `,
+      `UPDATE organizations
+       SET plan=$1,
+           user_limit=$2,
+           status='active',
+           mp_subscription_id=$3,
+           billing_status=$4,
+           next_payment_at=$5,
+           subscription_ends_at=NULL,
+           billing_updated_at=NOW(),
+           updated_at=NOW()
+       WHERE id=$6`,
       [
         planId,
         plan.userLimit,
@@ -730,21 +684,15 @@ async function syncMercadoPagoSubscription(
         organizationId
       ]
     );
-    await query('INSERT INTO audit_logs(organization_id,actor_id,action,target_type,target_id,details) VALUES($1,NULL,$2,$3,$4,$5)',[organizationId,'billing_authorized','billing',organizationId,JSON.stringify({plan:planId,status:mpStatus,subscriptionId:subscription.id})]);
-
   } else {
-
     await query(
-      `
-      UPDATE organizations
-      SET
-        mp_subscription_id=$1,
-        billing_status=$2,
-        next_payment_at=$3,
-        billing_updated_at=NOW(),
-        updated_at=NOW()
-      WHERE id=$4
-      `,
+      `UPDATE organizations
+       SET mp_subscription_id=$1,
+           billing_status=$2,
+           next_payment_at=$3,
+           billing_updated_at=NOW(),
+           updated_at=NOW()
+       WHERE id=$4`,
       [
         subscription.id,
         mpStatus,
@@ -753,13 +701,31 @@ async function syncMercadoPagoSubscription(
       ]
     );
   }
+
+  await query(
+    `INSERT INTO audit_logs
+       (organization_id,actor_id,action,target_type,target_id,details)
+     VALUES($1,NULL,$2,$3,$4,$5)`,
+    [
+      organizationId,
+      mpStatus === 'authorized' ? 'billing_authorized' : 'billing_status_updated',
+      'billing',
+      organizationId,
+      JSON.stringify({
+        plan: planId,
+        status: mpStatus,
+        subscriptionId: subscription.id
+      })
+    ]
+  );
+
+  return { organizationId, planId, subscription };
 }
 
 
 /* --------------------------------------------
-   FALLBACK DE SINCRONIZAÇÃO APÓS CHECKOUT
+   SINCRONIZAÇÃO MANUAL
    -------------------------------------------- */
-
 app.post(
   '/api/billing/sync',
   requireAuth,
@@ -767,60 +733,77 @@ app.post(
   async (req, res) => {
     try {
       const organizationId = tenant(req);
-      await ensureBillingCheckoutMap();
-
-      const mappings = (
+      const org = (
         await query(
-          `SELECT mp_plan_id, plan_id
-           FROM billing_checkout_map
-           WHERE organization_id=$1
-           ORDER BY updated_at DESC`,
+          `SELECT id, plan, status, billing_status, mp_subscription_id, next_payment_at
+           FROM organizations WHERE id=$1`,
           [organizationId]
         )
-      ).rows;
+      ).rows[0];
 
-      if (!mappings.length) {
-        return res.status(404).json({
-          error: 'Nenhum checkout de assinatura encontrado para esta empresa.'
-        });
-      }
-for (const mapping of mappings) {
-        const search = await mercadoPagoRequest(
-          `/preapproval/search?preapproval_plan_id=${encodeURIComponent(mapping.mp_plan_id)}&limit=20`
-        );
+      if (!org) return res.status(404).json({ error: 'Empresa não encontrada.' });
 
-        const subscriptions = Array.isArray(search?.results) ? search.results : [];
-        subscriptions.sort((a, b) =>
-          new Date(b.last_modified || b.date_created || 0).getTime() -
-          new Date(a.last_modified || a.date_created || 0).getTime()
-        );
-
-        const candidate = subscriptions.find(
-          (subscription) => subscription?.id
-        );
-
-        if (!candidate) continue;
-
-        await syncMercadoPagoSubscription(candidate.id);
-
-        const org = (
+      // Se já conhecemos a assinatura, sincroniza diretamente.
+      if (org.mp_subscription_id) {
+        await syncMercadoPagoSubscription(org.mp_subscription_id);
+      } else {
+        await ensureBillingCheckoutMap();
+        const mappings = (
           await query(
-            `SELECT id, plan, status, billing_status, mp_subscription_id, next_payment_at
-             FROM organizations WHERE id=$1`,
+            `SELECT mp_plan_id, plan_id
+             FROM billing_checkout_map
+             WHERE organization_id=$1
+             ORDER BY updated_at DESC`,
             [organizationId]
           )
-        ).rows[0];
+        ).rows;
 
-        console.log(
-          `[BILLING] Sincronização concluída: org=${organizationId} subscription=${candidate.id} status=${org?.billing_status || 'unknown'}`
-        );
+        if (!mappings.length) {
+          return res.status(404).json({
+            error: 'Nenhum checkout de assinatura encontrado para esta empresa.'
+          });
+        }
 
-        return res.json({ ok: true, organization: org });
+        let found = false;
+        for (const mapping of mappings) {
+          const search = await mercadoPagoRequest(
+            `/preapproval/search?preapproval_plan_id=${encodeURIComponent(mapping.mp_plan_id)}&limit=20`
+          );
+
+          const subscriptions = Array.isArray(search?.results) ? search.results : [];
+          subscriptions.sort((a, b) =>
+            new Date(b.last_modified || b.date_created || 0).getTime() -
+            new Date(a.last_modified || a.date_created || 0).getTime()
+          );
+
+          const candidate = subscriptions.find(x => x?.id);
+          if (!candidate) continue;
+
+          await syncMercadoPagoSubscription(candidate.id);
+          found = true;
+          break;
+        }
+
+        if (!found) {
+          return res.status(404).json({
+            error: 'Nenhuma assinatura encontrada no Mercado Pago para os checkouts desta empresa.'
+          });
+        }
       }
 
-      return res.status(404).json({
-        error: 'Nenhuma assinatura encontrada no Mercado Pago para os checkouts desta empresa.'
-      });
+      const updated = (
+        await query(
+          `SELECT id, plan, status, billing_status, mp_subscription_id, next_payment_at
+           FROM organizations WHERE id=$1`,
+          [organizationId]
+        )
+      ).rows[0];
+
+      console.log(
+        `[BILLING] Sincronização concluída: org=${organizationId} subscription=${updated?.mp_subscription_id || 'n/a'} status=${updated?.billing_status || 'unknown'}`
+      );
+
+      return res.json({ ok: true, organization: updated });
     } catch (error) {
       console.error('[BILLING SYNC] Erro:', error);
       return res.status(error.status || 500).json({
@@ -829,6 +812,7 @@ for (const mapping of mappings) {
     }
   }
 );
+
 
 /* ============================================
    MERCADO PAGO - WEBHOOK
@@ -979,10 +963,35 @@ app.post('/api/billing/webhook', async (req, res) => {
     }
 
     if (type === 'subscription_authorized_payment') {
-      console.log(
-        '[Mercado Pago] Pagamento recorrente recebido:',
-        dataId
+      if (!dataId) {
+        console.log('[Mercado Pago] Fatura recorrente sem ID.');
+        return;
+      }
+
+      const invoice = await mercadoPagoRequest(
+        `/authorized_payments/${encodeURIComponent(dataId)}`
       );
+
+      console.log('[Mercado Pago] Fatura recorrente:', {
+        id: invoice.id,
+        preapprovalId: invoice.preapproval_id || null,
+        status: invoice.status || null,
+        paymentStatus: invoice.payment?.status || null
+      });
+
+      if (invoice.preapproval_id) {
+        await syncMercadoPagoSubscription(String(invoice.preapproval_id));
+
+        if (invoice.payment?.status === 'approved') {
+          await query(
+            `UPDATE organizations
+             SET last_payment_at=NOW(), billing_updated_at=NOW(), updated_at=NOW()
+             WHERE mp_subscription_id=$1`,
+            [String(invoice.preapproval_id)]
+          );
+        }
+      }
+
       return;
     }
 
@@ -1022,7 +1031,5 @@ app.post('/api/billing/webhook', async (req, res) => {
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,version:'9.0.0',mode:'multi-tenant-saas',time:new Date().toISOString()}));app.use('/api',(req,res)=>res.status(404).json({error:'Rota não encontrada.'}));app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Erro interno do servidor.'});});
-initDatabase().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`Central de Serviços V8 Clean em http://localhost:${PORT}`))).catch(e=>{console.error('Falha ao iniciar:',e);process.exit(1);});
-
-
+app.get('/health',(req,res)=>res.json({ok:true,version:'9.1.0',mode:'multi-tenant-saas',time:new Date().toISOString()}));app.use('/api',(req,res)=>res.status(404).json({error:'Rota não encontrada.'}));app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Erro interno do servidor.'});});
+initDatabase().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`Central de Serviços V9.1 em http://localhost:${PORT}`))).catch(e=>{console.error('Falha ao iniciar:',e);process.exit(1);});
