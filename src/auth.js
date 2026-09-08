@@ -170,7 +170,7 @@ async function requireAuth(req,res,next){
 
   // Bloqueio central por assinatura
   if(u.billing_required && !u.is_super_admin){
-    const allowed=req.path==="/api/me" || req.path==="/api/auth/logout" || req.path.startsWith("/api/billing/");
+    const allowed=req.path==="/assinatura" || req.path==="/api/me" || req.path==="/api/auth/logout" || req.path.startsWith("/api/billing/");
 
     if(!allowed){
       if(req.path.startsWith("/api/")){
