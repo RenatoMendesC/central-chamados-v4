@@ -23,10 +23,6 @@ function hasPlan(minPlan='start'){
   const org=meta?.organization||{};
   const status=String(org.status||me?.organizationStatus||'').toLowerCase();
   const trialEnds=org.trial_ends_at||org.trialEndsAt||me?.organizationTrialEndsAt||null;
-  if(status==='trial'&&trialEnds){
-    const end=new Date(trialEnds);
-    if(!Number.isNaN(end.getTime())&&end.getTime()>Date.now())return true;
-  }
   const current=PLAN_LEVEL[String(org.plan||me?.organizationPlan||'start').toLowerCase()]||1;
   const required=PLAN_LEVEL[String(minPlan||'start').toLowerCase()]||1;
   return current>=required;
