@@ -187,22 +187,35 @@ function showTrialWelcome(){
   sessionStorage.setItem(sessionKey,'1');
 
   const isAdmin=me?.role==='admin';
-  const title=info.expired
-    ? 'Seu período de teste terminou'
-    : 'Seu período de teste está ativo';
+  const billingStatus=me?.organizationBillingStatus||'';
+  const billingBlocked=me?.billingRequired && !info.expired;
 
-  const description=info.expired
-    ? (
-        isAdmin
+  const billingMessages={
+    pending:{title:'Assinatura pendente',description:isAdmin?'Sua assinatura ainda não foi ativada. Escolha um plano ou conclua o pagamento para continuar utilizando a plataforma.':'A assinatura da empresa está pendente. Entre em contato com o administrador.'},
+    cancelled:{title:'Assinatura cancelada',description:isAdmin?'A assinatura da empresa foi cancelada. Escolha um plano para continuar utilizando a plataforma.':'A assinatura da empresa foi cancelada. Entre em contato com o administrador.'},
+    paused:{title:'Assinatura pausada',description:isAdmin?'A assinatura da empresa está pausada. Regularize a cobrança para continuar utilizando a plataforma.':'A assinatura da empresa está pausada. Entre em contato com o administrador.'},
+    inactive:{title:'Assinatura necessária',description:isAdmin?'Escolha um dos planos disponíveis para continuar utilizando a plataforma.':'A empresa não possui uma assinatura ativa. Entre em contato com o administrador.'}
+  };
+
+  const billingMessage=billingMessages[billingStatus]||billingMessages.inactive;
+  const title=billingBlocked
+    ? billingMessage.title
+    : info.expired
+      ? 'Seu período de teste terminou'
+      : 'Seu período de teste está ativo';
+
+  const description=billingBlocked
+    ? billingMessage.description
+    : info.expired
+      ? (isAdmin
           ? 'Para continuar utilizando todos os recursos da Central de Serviços, escolha um dos planos disponíveis.'
-          : 'O período de teste da sua empresa terminou. Entre em contato com o administrador para continuar utilizando a plataforma.'
-      )
-    : `Você tem ${info.days} ${info.days===1?'dia restante':'dias restantes'} para explorar a Central de Serviços${info.end?` — seu teste vai até ${fmtShort(info.end)}`:''}.`;
+          : 'O período de teste da sua empresa terminou. Entre em contato com o administrador para continuar utilizando a plataforma.')
+      : `Você tem ${info.days} ${info.days===1?'dia restante':'dias restantes'} para explorar a Central de Serviços${info.end?` — seu teste vai até ${fmtShort(info.end)}`:''}.`;
 
   const bg=modal(`
     <div class="modal-head">
       <div>
-        <span class="eyebrow">${info.expired?'PERÍODO ENCERRADO':'BEM-VINDO À CENTRAL'}</span>
+        <span class="eyebrow">${billingBlocked?(billingStatus==='pending'?'ASSINATURA PENDENTE':billingStatus==='cancelled'?'ASSINATURA CANCELADA':billingStatus==='paused'?'ASSINATURA PAUSADA':'ASSINATURA NECESSÁRIA'):(info.expired?'PERÍODO ENCERRADO':'BEM-VINDO À CENTRAL')}</span>
         <h2>${title}</h2>
         <p>${description}</p>
       </div>
