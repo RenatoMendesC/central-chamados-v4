@@ -166,6 +166,19 @@ async function requireAuth(req,res,next){
   }
 
   req.user=u;
+
+  // Bloqueio central por assinatura
+  if(u.billing_required && !u.is_super_admin){
+    const allowed=req.path==="/api/me" || req.path==="/api/auth/logout" || req.path.startsWith("/api/billing/");
+
+    if(!allowed){
+      if(req.path.startsWith("/api/")){
+        return res.status(402).json({error:"Assinatura necessaria para continuar utilizando a plataforma.",code:"BILLING_REQUIRED",billingRequired:true,redirect:"/assinatura"});
+      }
+      return res.redirect("/assinatura");
+    }
+  }
+
   next();
 }
 
