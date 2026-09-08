@@ -814,7 +814,96 @@ app.post(
     }
   }
 );
+/* --------------------------------------------
+   CANCELAR ASSINATURA
+   -------------------------------------------- */
 
+app.post(
+  '/api/billing/cancel',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const organizationId = tenant(req);
+
+      const organization = (
+        await query(
+          `SELECT id, plan, billing_status, mp_subscription_id
+           FROM organizations
+           WHERE id=$1`,
+          [organizationId]
+        )
+      ).rows[0];
+
+      if (!organization) {
+        return res.status(404).json({
+          error: 'Empresa não encontrada.'
+        });
+      }
+
+      if (!organization.mp_subscription_id) {
+        return res.status(400).json({
+          error: 'Esta empresa não possui uma assinatura vinculada.'
+        });
+      }
+
+      if (organization.billing_status === 'cancelled') {
+        return res.status(400).json({
+          error: 'Esta assinatura já está cancelada.'
+        });
+      }
+
+      const subscription = await mercadoPagoRequest(
+        `/preapproval/${encodeURIComponent(
+          organization.mp_subscription_id
+        )}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            status: 'cancelled'
+          })
+        }
+      );
+
+      await syncMercadoPagoSubscription(
+        organization.mp_subscription_id
+      );
+
+      await audit(
+        req,
+        'billing_subscription_cancelled',
+        'billing',
+        organizationId,
+        {
+          subscriptionId: organization.mp_subscription_id,
+          status: subscription.status || 'cancelled'
+        }
+      );
+
+      console.log(
+        `[BILLING] Assinatura cancelada: org=${organizationId} subscription=${organization.mp_subscription_id}`
+      );
+
+      return res.json({
+        ok: true,
+        message: 'Assinatura cancelada com sucesso.',
+        subscription: {
+          id: subscription.id,
+          status: subscription.status
+        }
+      });
+
+    } catch (error) {
+      console.error('[BILLING CANCEL] Erro:', error);
+
+      return res.status(error.status || 500).json({
+        error:
+          error.message ||
+          'Erro ao cancelar assinatura.'
+      });
+    }
+  }
+);
 
 /* ============================================
    MERCADO PAGO - WEBHOOK
