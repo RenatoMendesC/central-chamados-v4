@@ -13,12 +13,21 @@ async function notify(oid,uid,tid,title,body){if(uid)await query('INSERT INTO no
 async function setting(oid,key,fallback=''){const r=await query('SELECT value FROM organization_settings WHERE organization_id=$1 AND key=$2',[oid,key]);return r.rows[0]?.value??fallback;}
 async function dueFor(oid,p){const h=Number(await setting(oid,`sla_${p}`,{low:72,medium:48,high:24,urgent:4}[p]));return new Date(Date.now()+Math.max(1,h)*3600000).toISOString();}
 const canSee=(u,t)=>u.role!=='requester'||Number(t.requester_id)===Number(u.id);
+function pickChanges(before,after,fields){
+  const changes={};
+  for(const field of fields){
+    const a=before?.[field]??null,b=after?.[field]??null;
+    if(String(a)!==String(b))changes[field]={from:a,to:b};
+  }
+  return changes;
+}
+
 
 // Pages
 app.get('/',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect(u.is_super_admin?'/plataforma':'/dashboard');res.sendFile(page('index.html'));});
 app.get('/apresentacao',(req,res)=>res.sendFile(page('apresentacao.html')));
 app.get('/criar-conta',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect('/dashboard');res.sendFile(page('criar-conta.html'));});
-for(const [url,file,roles] of [['/dashboard','dashboard.html',[]],['/chamados','chamados.html',[]],['/ativos','ativos.html',['admin','agent']],['/base-conhecimento','base-conhecimento.html',[]],['/relatorios','relatorios.html',['admin']],['/usuarios','usuarios.html',['admin']],['/configuracoes','configuracoes.html',['admin']]])app.get(url,requireAuth,...(roles.length?[requireRole(...roles)]:[]),(req,res)=>res.sendFile(page(file)));
+for(const [url,file,roles] of [['/dashboard','dashboard.html',[]],['/chamados','chamados.html',[]],['/ativos','ativos.html',['admin','agent']],['/base-conhecimento','base-conhecimento.html',[]],['/relatorios','relatorios.html',['admin']],['/historico','historico.html',['admin','agent']],['/usuarios','usuarios.html',['admin']],['/assinatura','assinatura.html',[]],['/configuracoes','configuracoes.html',['admin']]])app.get(url,requireAuth,...(roles.length?[requireRole(...roles)]:[]),(req,res)=>res.sendFile(page(file)));
 app.get('/plataforma',requireAuth,requireSuperAdmin,(req,res)=>res.sendFile(page('plataforma.html')));
 
 // Auth + invitation-only signup
@@ -26,7 +35,38 @@ app.post('/api/auth/login',limiter,async(req,res)=>{const username=clean(req.bod
 app.get('/api/public/invite/:token',async(req,res)=>{const r=await query(`SELECT i.email,i.role,i.expires_at,o.name organization_name FROM invitations i JOIN organizations o ON o.id=i.organization_id WHERE i.token=$1 AND i.used_at IS NULL AND i.expires_at>NOW() AND o.status!='suspended'`,[clean(req.params.token,96)]);if(!r.rowCount)return res.status(404).json({error:'Convite inválido ou expirado.'});res.json({invite:r.rows[0]});});
 app.post('/api/auth/register',limiter,async(req,res)=>{const token=clean(req.body.inviteToken,96),inv=(await query(`SELECT i.* FROM invitations i JOIN organizations o ON o.id=i.organization_id WHERE i.token=$1 AND i.used_at IS NULL AND i.expires_at>NOW() AND o.status!='suspended'`,[token])).rows[0];if(!inv)return res.status(400).json({error:'Cadastro permitido somente por convite válido.'});const name=clean(req.body.name,120),username=clean(req.body.username,60).toLowerCase(),email=clean(req.body.email,160)||inv.email||null,department=clean(req.body.department,100)||null,password=String(req.body.password||'');if(name.length<3||username.length<3||password.length<8)return res.status(400).json({error:'Preencha os dados e use senha de pelo menos 8 caracteres.'});if(!/^[a-z0-9._-]+$/.test(username))return res.status(400).json({error:'Usuário inválido.'});if((await query('SELECT 1 FROM users WHERE username=$1',[username])).rowCount)return res.status(409).json({error:'Esse usuário já existe.'});const lim=(await query('SELECT user_limit FROM organizations WHERE id=$1',[inv.organization_id])).rows[0].user_limit,count=(await query("SELECT COUNT(*)::int n FROM users WHERE organization_id=$1 AND status!='blocked'",[inv.organization_id])).rows[0].n;if(count>=lim)return res.status(403).json({error:'A empresa atingiu o limite de usuários do plano.'});const r=await query("INSERT INTO users(organization_id,name,username,email,department,role,status,password_hash) VALUES($1,$2,$3,$4,$5,$6,'active',$7) RETURNING id",[inv.organization_id,name,username,email,department,inv.role,await bcrypt.hash(password,12)]);await query('UPDATE invitations SET used_at=NOW() WHERE id=$1',[inv.id]);res.status(201).json({message:'Conta criada. Você já pode entrar.',id:Number(r.rows[0].id)});});
 app.post('/api/auth/logout',requireAuth,async(req,res)=>{clearAuthCookie(res);res.json({ok:true});});
-app.get('/api/me',requireAuth,(req,res)=>res.json({user:pub(req.user)}));
+app.get('/api/me', requireAuth, (req, res) => {
+  const user = pub(req.user);
+
+  user.organizationStatus =
+    req.user.organization_status || null;
+
+  user.organizationPlan =
+    req.user.organization_plan || null;
+
+  user.organizationTrialDays =
+    req.user.organization_trial_days || null;
+
+  user.organizationTrialEndsAt =
+    req.user.organization_trial_ends_at || null;
+
+  user.organizationBillingStatus =
+    req.user.organization_billing_status || null;
+
+  user.organizationSubscriptionEndsAt =
+    req.user.organization_subscription_ends_at || null;
+
+  user.trialExpired =
+    Boolean(req.user.trial_expired);
+
+  user.subscriptionExpired =
+    Boolean(req.user.subscription_expired);
+
+  user.billingRequired =
+    Boolean(req.user.billing_required);
+
+  res.json({ user });
+});
 app.patch('/api/me',requireAuth,async(req,res)=>{const photo=req.body.photoData?String(req.body.photoData):null;if(photo&&(!photo.startsWith('data:image/')||photo.length>1500000))return res.status(400).json({error:'Foto inválida.'});const r=await query('UPDATE users SET name=$1,email=$2,department=$3,photo_data=$4,updated_at=NOW() WHERE id=$5 RETURNING *',[clean(req.body.name,120),clean(req.body.email,160)||null,clean(req.body.department,100)||null,photo,req.user.id]);res.json({user:pub({...r.rows[0],organization_name:req.user.organization_name})});});
 app.patch('/api/me/password',requireAuth,async(req,res)=>{const r=await query('SELECT password_hash FROM users WHERE id=$1',[req.user.id]),next=String(req.body.newPassword||'');if(next.length<8||!(await bcrypt.compare(String(req.body.currentPassword||''),r.rows[0].password_hash)))return res.status(400).json({error:'Senha atual incorreta ou nova senha inválida.'});await query('UPDATE users SET password_hash=$1 WHERE id=$2',[await bcrypt.hash(next,12),req.user.id]);res.json({ok:true});});
 
@@ -45,26 +85,26 @@ app.post('/api/invitations',requireAuth,requireRole('admin'),async(req,res)=>{co
 
 // Tickets
 app.get('/api/tickets',requireAuth,async(req,res)=>{const oid=tenant(req),args=[oid],where=['t.organization_id=$1'],q=clean(req.query.q,100);if(req.user.role==='requester'){args.push(req.user.id);where.push(`t.requester_id=$${args.length}`);}if(q){args.push(`%${q}%`);where.push(`(t.title ILIKE $${args.length} OR CAST(t.id AS TEXT) ILIKE $${args.length} OR r.name ILIKE $${args.length})`);}for(const [key,vals,col] of [['status',['open','progress','resolved','closed'],'status'],['priority',['low','medium','high','urgent'],'priority']])if(vals.includes(req.query[key])){args.push(req.query[key]);where.push(`t.${col}=$${args.length}`);}if(clean(req.query.category,80)){args.push(clean(req.query.category,80));where.push(`t.category=$${args.length}`);}if(req.query.overdue==='1')where.push("t.due_at<NOW() AND t.status NOT IN ('resolved','closed')");if(req.query.assigned==='me'){args.push(req.user.id);where.push(`t.assigned_to=$${args.length}`);}if(req.query.assigned==='unassigned')where.push('t.assigned_to IS NULL');const r=await query(`SELECT t.*,r.name requester_name,r.photo_data requester_photo,a.name assigned_name,a.photo_data assigned_photo,ast.asset_tag,ast.name asset_name FROM tickets t JOIN users r ON r.id=t.requester_id LEFT JOIN users a ON a.id=t.assigned_to LEFT JOIN assets ast ON ast.id=t.asset_id WHERE ${where.join(' AND ')} ORDER BY CASE t.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,t.created_at DESC LIMIT 500`,args);res.json({tickets:r.rows});});
-app.post('/api/tickets',requireAuth,async(req,res)=>{const oid=tenant(req),title=clean(req.body.title,180),cat=clean(req.body.category,80),p=priority(req.body.priority),imp=impact(req.body.impact),desc=clean(req.body.description,5000),asset=req.body.assetId?Number(req.body.assetId):null;if(title.length<3||!cat||desc.length<5)return res.status(400).json({error:'Preencha título, categoria e descrição.'});if(asset&&!(await query('SELECT 1 FROM assets WHERE id=$1 AND organization_id=$2',[asset,oid])).rowCount)return res.status(400).json({error:'Ativo inválido.'});const due=await dueFor(oid,p),r=await query('INSERT INTO tickets(organization_id,title,category,priority,impact,description,requester_id,due_at,asset_id,location) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id',[oid,title,cat,p,imp,desc,req.user.id,due,asset,clean(req.body.location,140)||null]),id=Number(r.rows[0].id);await event(req,id,'created',{priority:p,impact:imp});const agents=await query("SELECT id FROM users WHERE organization_id=$1 AND status='active' AND role IN ('admin','agent')",[oid]);for(const u of agents.rows)if(Number(u.id)!==Number(req.user.id))await notify(oid,u.id,id,`Novo chamado #${id}`,title);res.status(201).json({id});});
+app.post('/api/tickets',requireAuth,async(req,res)=>{const oid=tenant(req),title=clean(req.body.title,180),cat=clean(req.body.category,80),p=priority(req.body.priority),imp=impact(req.body.impact),desc=clean(req.body.description,5000),asset=req.body.assetId?Number(req.body.assetId):null;if(title.length<3||!cat||desc.length<5)return res.status(400).json({error:'Preencha título, categoria e descrição.'});if(asset&&!(await query('SELECT 1 FROM assets WHERE id=$1 AND organization_id=$2',[asset,oid])).rowCount)return res.status(400).json({error:'Ativo inválido.'});const due=await dueFor(oid,p),r=await query('INSERT INTO tickets(organization_id,title,category,priority,impact,description,requester_id,due_at,asset_id,location) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id',[oid,title,cat,p,imp,desc,req.user.id,due,asset,clean(req.body.location,140)||null]),id=Number(r.rows[0].id);await event(req,id,'created',{priority:p,impact:imp});await audit(req,'ticket_created','ticket',id,{title,category:cat,priority:p,impact:imp});const agents=await query("SELECT id FROM users WHERE organization_id=$1 AND status='active' AND role IN ('admin','agent')",[oid]);for(const u of agents.rows)if(Number(u.id)!==Number(req.user.id))await notify(oid,u.id,id,`Novo chamado #${id}`,title);res.status(201).json({id});});
 app.get('/api/tickets/:id',requireAuth,async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),t=(await query('SELECT t.*,r.name requester_name,r.photo_data requester_photo,a.name assigned_name,a.photo_data assigned_photo,ast.asset_tag,ast.name asset_name,ast.model asset_model FROM tickets t JOIN users r ON r.id=t.requester_id LEFT JOIN users a ON a.id=t.assigned_to LEFT JOIN assets ast ON ast.id=t.asset_id WHERE t.id=$1 AND t.organization_id=$2',[id,oid])).rows[0];if(!t||!canSee(req.user,t))return res.status(404).json({error:'Chamado não encontrado.'});const [c,e,a]=await Promise.all([query('SELECT c.*,u.name author_name,u.photo_data author_photo,u.role author_role FROM comments c JOIN users u ON u.id=c.author_id WHERE c.ticket_id=$1 AND c.organization_id=$2 ORDER BY c.created_at',[id,oid]),query('SELECT e.*,u.name actor_name FROM ticket_events e LEFT JOIN users u ON u.id=e.actor_id WHERE e.ticket_id=$1 AND e.organization_id=$2 ORDER BY e.created_at DESC LIMIT 100',[id,oid]),query('SELECT id,file_name,mime_type,size_bytes,created_at FROM attachments WHERE ticket_id=$1 AND organization_id=$2 ORDER BY created_at DESC',[id,oid])]);res.json({ticket:t,comments:c.rows,events:e.rows,attachments:a.rows});});
-app.patch('/api/tickets/:id',requireAuth,requireRole('admin','agent'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),t=(await query('SELECT * FROM tickets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];if(!t)return res.status(404).json({error:'Chamado não encontrado.'});const st=status(req.body.status??t.status),p=priority(req.body.priority??t.priority),imp=impact(req.body.impact??t.impact),assigned=req.body.assignedTo?Number(req.body.assignedTo):null,asset=req.body.assetId?Number(req.body.assetId):null;if(assigned&&!(await query("SELECT 1 FROM users WHERE id=$1 AND organization_id=$2 AND status='active'",[assigned,oid])).rowCount)return res.status(400).json({error:'Responsável inválido.'});const due=p!==t.priority?await dueFor(oid,p):t.due_at,resolved=['resolved','closed'].includes(st)?(t.resolved_at||new Date().toISOString()):null;await query('UPDATE tickets SET status=$1,priority=$2,impact=$3,assigned_to=$4,asset_id=$5,location=$6,due_at=$7,resolved_at=$8,updated_at=NOW() WHERE id=$9 AND organization_id=$10',[st,p,imp,assigned,asset,clean(req.body.location??t.location,140)||null,due,resolved,id,oid]);await event(req,id,'updated',{status:st,priority:p});await notify(oid,t.requester_id,id,`Chamado #${id} atualizado`,'O chamado recebeu uma atualização.');res.json({ok:true});});
-app.delete('/api/tickets/:id',requireAuth,requireRole('admin'),async(req,res)=>{await query('DELETE FROM tickets WHERE id=$1 AND organization_id=$2',[Number(req.params.id),tenant(req)]);res.json({ok:true});});
-app.post('/api/tickets/:id/comments',requireAuth,async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),t=(await query('SELECT * FROM tickets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0],body=clean(req.body.body,3000);if(!t||!canSee(req.user,t))return res.status(404).json({error:'Chamado não encontrado.'});if(body.length<2)return res.status(400).json({error:'Comentário muito curto.'});await query('INSERT INTO comments(organization_id,ticket_id,author_id,body) VALUES($1,$2,$3,$4)',[oid,id,req.user.id,body]);if(req.user.role!=='requester'&&!t.first_response_at)await query('UPDATE tickets SET first_response_at=NOW() WHERE id=$1 AND organization_id=$2',[id,oid]);await event(req,id,'commented');res.status(201).json({ok:true});});
+app.patch('/api/tickets/:id',requireAuth,requireRole('admin','agent'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),t=(await query('SELECT * FROM tickets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];if(!t)return res.status(404).json({error:'Chamado não encontrado.'});const st=status(req.body.status??t.status),p=priority(req.body.priority??t.priority),imp=impact(req.body.impact??t.impact),assigned=req.body.assignedTo?Number(req.body.assignedTo):null,asset=req.body.assetId?Number(req.body.assetId):null;if(assigned&&!(await query("SELECT 1 FROM users WHERE id=$1 AND organization_id=$2 AND status='active'",[assigned,oid])).rowCount)return res.status(400).json({error:'Responsável inválido.'});const due=p!==t.priority?await dueFor(oid,p):t.due_at,resolved=['resolved','closed'].includes(st)?(t.resolved_at||new Date().toISOString()):null;const nextLocation=clean(req.body.location??t.location,140)||null;await query('UPDATE tickets SET status=$1,priority=$2,impact=$3,assigned_to=$4,asset_id=$5,location=$6,due_at=$7,resolved_at=$8,updated_at=NOW() WHERE id=$9 AND organization_id=$10',[st,p,imp,assigned,asset,nextLocation,due,resolved,id,oid]);await audit(req,'ticket_updated','ticket',id,{changes:pickChanges(t,{...t,status:st,priority:p,impact:imp,assigned_to:assigned,asset_id:asset,location:nextLocation},['status','priority','impact','assigned_to','asset_id','location'])});await event(req,id,'updated',{status:st,priority:p});await notify(oid,t.requester_id,id,`Chamado #${id} atualizado`,'O chamado recebeu uma atualização.');res.json({ok:true});});
+app.delete('/api/tickets/:id',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),t=(await query('SELECT title,status,priority FROM tickets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];await query('DELETE FROM tickets WHERE id=$1 AND organization_id=$2',[id,oid]);await audit(req,'ticket_deleted','ticket',id,t||{});res.json({ok:true});});
+app.post('/api/tickets/:id/comments',requireAuth,async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),t=(await query('SELECT * FROM tickets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0],body=clean(req.body.body,3000);if(!t||!canSee(req.user,t))return res.status(404).json({error:'Chamado não encontrado.'});if(body.length<2)return res.status(400).json({error:'Comentário muito curto.'});await query('INSERT INTO comments(organization_id,ticket_id,author_id,body) VALUES($1,$2,$3,$4)',[oid,id,req.user.id,body]);if(req.user.role!=='requester'&&!t.first_response_at)await query('UPDATE tickets SET first_response_at=NOW() WHERE id=$1 AND organization_id=$2',[id,oid]);await event(req,id,'commented');await audit(req,'ticket_comment_added','ticket',id,{preview:body.slice(0,180)});res.status(201).json({ok:true});});
 app.post('/api/tickets/:id/attachments',requireAuth,async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),t=(await query('SELECT * FROM tickets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0],data=String(req.body.data||'');if(!t||!canSee(req.user,t))return res.status(404).json({error:'Chamado não encontrado.'});if(!data.startsWith('data:')||data.length>1500000)return res.status(400).json({error:'Arquivo inválido ou muito grande.'});const r=await query('INSERT INTO attachments(organization_id,ticket_id,uploaded_by,file_name,mime_type,file_data,size_bytes) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id',[oid,id,req.user.id,clean(req.body.fileName,180),clean(req.body.mimeType,120)||'application/octet-stream',data,Math.round(data.length*.75)]);res.status(201).json({id:Number(r.rows[0].id)});});
 app.get('/api/attachments/:id',requireAuth,async(req,res)=>{const oid=tenant(req),a=(await query('SELECT a.*,t.requester_id FROM attachments a JOIN tickets t ON t.id=a.ticket_id WHERE a.id=$1 AND a.organization_id=$2',[Number(req.params.id),oid])).rows[0];if(!a||!canSee(req.user,a))return res.status(404).json({error:'Arquivo não encontrado.'});res.json({fileName:a.file_name,mimeType:a.mime_type,data:a.file_data});});
 
 // Assets
 app.get('/api/assets',requireAuth,requireRole('admin','agent'),async(req,res)=>{const oid=tenant(req),q=clean(req.query.q,100),args=[oid],extra=q?(args.push(`%${q}%`),`AND (a.asset_tag ILIKE $2 OR a.name ILIKE $2 OR a.model ILIKE $2 OR a.serial_number ILIKE $2)`):'';const r=await query(`SELECT a.*,u.name assigned_user_name,(SELECT COUNT(*)::int FROM tickets t WHERE t.asset_id=a.id AND t.organization_id=$1) ticket_count FROM assets a LEFT JOIN users u ON u.id=a.assigned_user_id WHERE a.organization_id=$1 ${extra} ORDER BY a.updated_at DESC LIMIT 500`,args);res.json({assets:r.rows});});
-app.post('/api/assets',requireAuth,requireRole('admin','agent'),async(req,res)=>{const oid=tenant(req),tag=clean(req.body.assetTag,60),name=clean(req.body.name,140);if(!tag||!name)return res.status(400).json({error:'Patrimônio e nome são obrigatórios.'});try{const r=await query('INSERT INTO assets(organization_id,asset_tag,name,asset_type,manufacturer,model,serial_number,status,assigned_user_id,department,location,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id',[oid,tag,name,clean(req.body.assetType,80)||'Equipamento',clean(req.body.manufacturer,100)||null,clean(req.body.model,120)||null,clean(req.body.serialNumber,120)||null,['active','maintenance','stock','retired'].includes(req.body.status)?req.body.status:'active',req.body.assignedUserId?Number(req.body.assignedUserId):null,clean(req.body.department,100)||null,clean(req.body.location,140)||null,clean(req.body.notes,2000)||null]);res.status(201).json({id:Number(r.rows[0].id)});}catch(e){if(e.code==='23505')return res.status(409).json({error:'Patrimônio já existe nesta empresa.'});throw e;}});
-app.patch('/api/assets/:id',requireAuth,requireRole('admin','agent'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),o=(await query('SELECT * FROM assets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];if(!o)return res.status(404).json({error:'Ativo não encontrado.'});await query('UPDATE assets SET asset_tag=$1,name=$2,asset_type=$3,manufacturer=$4,model=$5,serial_number=$6,status=$7,assigned_user_id=$8,department=$9,location=$10,notes=$11,updated_at=NOW() WHERE id=$12 AND organization_id=$13',[clean(req.body.assetTag??o.asset_tag,60),clean(req.body.name??o.name,140),clean(req.body.assetType??o.asset_type,80),clean(req.body.manufacturer??o.manufacturer,100)||null,clean(req.body.model??o.model,120)||null,clean(req.body.serialNumber??o.serial_number,120)||null,['active','maintenance','stock','retired'].includes(req.body.status)?req.body.status:o.status,req.body.assignedUserId?Number(req.body.assignedUserId):null,clean(req.body.department??o.department,100)||null,clean(req.body.location??o.location,140)||null,clean(req.body.notes??o.notes,2000)||null,id,oid]);res.json({ok:true});});
-app.delete('/api/assets/:id',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id);await query('UPDATE tickets SET asset_id=NULL WHERE asset_id=$1 AND organization_id=$2',[id,oid]);await query('DELETE FROM assets WHERE id=$1 AND organization_id=$2',[id,oid]);res.json({ok:true});});
+app.post('/api/assets',requireAuth,requireRole('admin','agent'),async(req,res)=>{const oid=tenant(req),tag=clean(req.body.assetTag,60),name=clean(req.body.name,140);if(!tag||!name)return res.status(400).json({error:'Patrimônio e nome são obrigatórios.'});try{const r=await query('INSERT INTO assets(organization_id,asset_tag,name,asset_type,manufacturer,model,serial_number,status,assigned_user_id,department,location,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id',[oid,tag,name,clean(req.body.assetType,80)||'Equipamento',clean(req.body.manufacturer,100)||null,clean(req.body.model,120)||null,clean(req.body.serialNumber,120)||null,['active','maintenance','stock','retired'].includes(req.body.status)?req.body.status:'active',req.body.assignedUserId?Number(req.body.assignedUserId):null,clean(req.body.department,100)||null,clean(req.body.location,140)||null,clean(req.body.notes,2000)||null]);const id=Number(r.rows[0].id);await audit(req,'asset_created','asset',id,{assetTag:tag,name});res.status(201).json({id});}catch(e){if(e.code==='23505')return res.status(409).json({error:'Patrimônio já existe nesta empresa.'});throw e;}});
+app.patch('/api/assets/:id',requireAuth,requireRole('admin','agent'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),o=(await query('SELECT * FROM assets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];if(!o)return res.status(404).json({error:'Ativo não encontrado.'});const next={asset_tag:clean(req.body.assetTag??o.asset_tag,60),name:clean(req.body.name??o.name,140),asset_type:clean(req.body.assetType??o.asset_type,80),manufacturer:clean(req.body.manufacturer??o.manufacturer,100)||null,model:clean(req.body.model??o.model,120)||null,serial_number:clean(req.body.serialNumber??o.serial_number,120)||null,status:['active','maintenance','stock','retired'].includes(req.body.status)?req.body.status:o.status,assigned_user_id:req.body.assignedUserId?Number(req.body.assignedUserId):null,department:clean(req.body.department??o.department,100)||null,location:clean(req.body.location??o.location,140)||null,notes:clean(req.body.notes??o.notes,2000)||null};await query('UPDATE assets SET asset_tag=$1,name=$2,asset_type=$3,manufacturer=$4,model=$5,serial_number=$6,status=$7,assigned_user_id=$8,department=$9,location=$10,notes=$11,updated_at=NOW() WHERE id=$12 AND organization_id=$13',[next.asset_tag,next.name,next.asset_type,next.manufacturer,next.model,next.serial_number,next.status,next.assigned_user_id,next.department,next.location,next.notes,id,oid]);await audit(req,'asset_updated','asset',id,{changes:pickChanges(o,{...o,...next},['asset_tag','name','asset_type','manufacturer','model','serial_number','status','assigned_user_id','department','location'])});res.json({ok:true});});
+app.delete('/api/assets/:id',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),a=(await query('SELECT asset_tag,name,status FROM assets WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];await query('UPDATE tickets SET asset_id=NULL WHERE asset_id=$1 AND organization_id=$2',[id,oid]);await query('DELETE FROM assets WHERE id=$1 AND organization_id=$2',[id,oid]);await audit(req,'asset_deleted','asset',id,a||{});res.json({ok:true});});
 
 // Knowledge
 app.get('/api/knowledge',requireAuth,async(req,res)=>{const oid=tenant(req),args=[oid],where=['k.organization_id=$1'];if(req.user.role!=='admin'&&!req.user.is_super_admin)where.push('k.published=true');const q=clean(req.query.q,100);if(q){args.push(`%${q}%`);where.push(`(k.title ILIKE $2 OR k.summary ILIKE $2 OR k.content ILIKE $2)`);}const r=await query(`SELECT k.*,u.name author_name FROM knowledge_articles k LEFT JOIN users u ON u.id=k.author_id WHERE ${where.join(' AND ')} ORDER BY k.updated_at DESC LIMIT 200`,args);res.json({articles:r.rows});});
 app.get('/api/knowledge/:id',requireAuth,async(req,res)=>{const oid=tenant(req),a=(await query('SELECT k.*,u.name author_name FROM knowledge_articles k LEFT JOIN users u ON u.id=k.author_id WHERE k.id=$1 AND k.organization_id=$2',[Number(req.params.id),oid])).rows[0];if(!a||(!a.published&&req.user.role!=='admin'&&!req.user.is_super_admin))return res.status(404).json({error:'Artigo não encontrado.'});await query('UPDATE knowledge_articles SET views=views+1 WHERE id=$1 AND organization_id=$2',[a.id,oid]);res.json({article:a});});
-app.post('/api/knowledge',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),title=clean(req.body.title,180),content=clean(req.body.content,12000);if(title.length<3||content.length<20)return res.status(400).json({error:'Título e conteúdo são obrigatórios.'});const r=await query('INSERT INTO knowledge_articles(organization_id,title,summary,category,content,published,author_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id',[oid,title,clean(req.body.summary,320)||null,clean(req.body.category,80)||null,content,req.body.published!==false,req.user.id]);res.status(201).json({id:Number(r.rows[0].id)});});
-app.patch('/api/knowledge/:id',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),o=(await query('SELECT * FROM knowledge_articles WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];if(!o)return res.status(404).json({error:'Artigo não encontrado.'});await query('UPDATE knowledge_articles SET title=$1,summary=$2,category=$3,content=$4,published=$5,updated_at=NOW() WHERE id=$6 AND organization_id=$7',[clean(req.body.title??o.title,180),clean(req.body.summary??o.summary,320)||null,clean(req.body.category??o.category,80)||null,clean(req.body.content??o.content,12000),req.body.published===undefined?o.published:Boolean(req.body.published),id,oid]);res.json({ok:true});});
-app.delete('/api/knowledge/:id',requireAuth,requireRole('admin'),async(req,res)=>{await query('DELETE FROM knowledge_articles WHERE id=$1 AND organization_id=$2',[Number(req.params.id),tenant(req)]);res.json({ok:true});});
+app.post('/api/knowledge',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),title=clean(req.body.title,180),content=clean(req.body.content,12000);if(title.length<3||content.length<20)return res.status(400).json({error:'Título e conteúdo são obrigatórios.'});const r=await query('INSERT INTO knowledge_articles(organization_id,title,summary,category,content,published,author_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id',[oid,title,clean(req.body.summary,320)||null,clean(req.body.category,80)||null,content,req.body.published!==false,req.user.id]);const id=Number(r.rows[0].id);await audit(req,'knowledge_created','knowledge',id,{title});res.status(201).json({id});});
+app.patch('/api/knowledge/:id',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),o=(await query('SELECT * FROM knowledge_articles WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];if(!o)return res.status(404).json({error:'Artigo não encontrado.'});const next={title:clean(req.body.title??o.title,180),summary:clean(req.body.summary??o.summary,320)||null,category:clean(req.body.category??o.category,80)||null,content:clean(req.body.content??o.content,12000),published:req.body.published===undefined?o.published:Boolean(req.body.published)};await query('UPDATE knowledge_articles SET title=$1,summary=$2,category=$3,content=$4,published=$5,updated_at=NOW() WHERE id=$6 AND organization_id=$7',[next.title,next.summary,next.category,next.content,next.published,id,oid]);await audit(req,'knowledge_updated','knowledge',id,{changes:pickChanges(o,{...o,...next},['title','summary','category','published'])});res.json({ok:true});});
+app.delete('/api/knowledge/:id',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),id=Number(req.params.id),a=(await query('SELECT title,category FROM knowledge_articles WHERE id=$1 AND organization_id=$2',[id,oid])).rows[0];await query('DELETE FROM knowledge_articles WHERE id=$1 AND organization_id=$2',[id,oid]);await audit(req,'knowledge_deleted','knowledge',id,a||{});res.json({ok:true});});
 
 // Notifications / Dashboard / Reports
 app.get('/api/notifications',requireAuth,async(req,res)=>{const r=await query('SELECT * FROM notifications WHERE organization_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 30',[tenant(req),req.user.id]);res.json({notifications:r.rows,unread:r.rows.filter(x=>!x.is_read).length});});
@@ -74,13 +114,30 @@ app.get('/api/dashboard',requireAuth,async(req,res)=>{const oid=tenant(req),requ
 app.get('/api/reports',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),k=(await query("SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='open')::int open,COUNT(*) FILTER(WHERE status='progress')::int progress,COUNT(*) FILTER(WHERE status IN ('resolved','closed'))::int finished,COUNT(*) FILTER(WHERE due_at<NOW() AND status NOT IN ('resolved','closed'))::int overdue,ROUND(COALESCE(AVG(EXTRACT(EPOCH FROM(resolved_at-created_at))/3600) FILTER(WHERE resolved_at IS NOT NULL),0)::numeric,1) avg_hours,ROUND(COALESCE(AVG(EXTRACT(EPOCH FROM(first_response_at-created_at))/60) FILTER(WHERE first_response_at IS NOT NULL),0)::numeric,0) avg_first_response_min,ROUND(COALESCE(100.0*COUNT(*) FILTER(WHERE resolved_at IS NOT NULL AND resolved_at<=due_at)/NULLIF(COUNT(*) FILTER(WHERE resolved_at IS NOT NULL),0),0)::numeric,1) sla_compliance FROM tickets WHERE organization_id=$1",[oid])).rows[0],group=async col=>(await query(`SELECT ${col},COUNT(*)::int total FROM tickets WHERE organization_id=$1 GROUP BY ${col} ORDER BY total DESC`,[oid])).rows,agents=(await query("SELECT COALESCE(u.name,'Não atribuído') name,COUNT(*)::int total,COUNT(*) FILTER(WHERE t.status IN ('resolved','closed'))::int finished FROM tickets t LEFT JOIN users u ON u.id=t.assigned_to WHERE t.organization_id=$1 GROUP BY u.name ORDER BY total DESC",[oid])).rows,daily=(await query("SELECT TO_CHAR(d,'DD/MM') day,COUNT(t.id)::int total FROM generate_series(CURRENT_DATE-INTERVAL '13 days',CURRENT_DATE,INTERVAL '1 day') d LEFT JOIN tickets t ON t.created_at::date=d::date AND t.organization_id=$1 GROUP BY d ORDER BY d",[oid])).rows,aging=(await query("SELECT COUNT(*) FILTER(WHERE status NOT IN ('resolved','closed') AND NOW()-created_at<INTERVAL '24 hours')::int under24,COUNT(*) FILTER(WHERE status NOT IN ('resolved','closed') AND NOW()-created_at BETWEEN INTERVAL '24 hours' AND INTERVAL '72 hours')::int h24_72,COUNT(*) FILTER(WHERE status NOT IN ('resolved','closed') AND NOW()-created_at>INTERVAL '72 hours')::int over72 FROM tickets WHERE organization_id=$1",[oid])).rows[0];res.json({kpis:k,status:await group('status'),priority:await group('priority'),category:await group('category'),impact:await group('impact'),agents,daily,aging});});
 app.get('/api/audit',requireAuth,requireRole('admin'),async(req,res)=>{const r=await query('SELECT a.*,u.name actor_name FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id WHERE a.organization_id=$1 ORDER BY a.created_at DESC LIMIT 120',[tenant(req)]);res.json({logs:r.rows});});
 
+// V9 - Histórico de atividades da empresa
+app.get('/api/activity',requireAuth,requireRole('admin','agent'),async(req,res)=>{
+  const oid=tenant(req),args=[oid],where=['a.organization_id=$1'];
+  const action=clean(req.query.action,80),type=clean(req.query.type,40),q=clean(req.query.q,120);
+  const actor=Number(req.query.actor||0),from=clean(req.query.from,20),to=clean(req.query.to,20);
+  if(action){args.push(action);where.push(`a.action=$${args.length}`);}
+  if(type){args.push(type);where.push(`a.target_type=$${args.length}`);}
+  if(actor>0){args.push(actor);where.push(`a.actor_id=$${args.length}`);}
+  if(from){args.push(from);where.push(`a.created_at >= $${args.length}::date`);}
+  if(to){args.push(to);where.push(`a.created_at < ($${args.length}::date + INTERVAL '1 day')`);}
+  if(q){args.push(`%${q}%`);where.push(`(COALESCE(u.name,'Sistema') ILIKE $${args.length} OR a.action ILIKE $${args.length} OR a.target_type ILIKE $${args.length} OR CAST(a.target_id AS TEXT) ILIKE $${args.length} OR a.details::text ILIKE $${args.length})`);}
+  const logs=(await query(`SELECT a.*,COALESCE(u.name,'Sistema') actor_name,u.username actor_username FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id WHERE ${where.join(' AND ')} ORDER BY a.created_at DESC LIMIT 300`,args)).rows;
+  const actors=(await query("SELECT id,name FROM users WHERE organization_id=$1 ORDER BY name",[oid])).rows;
+  res.json({logs,actors});
+});
+
+
 // Tenant configuration
 app.get('/api/config',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),[c,d,s,o]=await Promise.all([query('SELECT * FROM categories WHERE organization_id=$1 ORDER BY name',[oid]),query('SELECT * FROM departments WHERE organization_id=$1 ORDER BY name',[oid]),query('SELECT key,value FROM organization_settings WHERE organization_id=$1',[oid]),query('SELECT * FROM organizations WHERE id=$1',[oid])]);res.json({categories:c.rows,departments:d.rows,settings:Object.fromEntries(s.rows.map(x=>[x.key,x.value])),organization:o.rows[0]});});
 app.post('/api/config/categories',requireAuth,requireRole('admin'),async(req,res)=>{try{await query('INSERT INTO categories(organization_id,name) VALUES($1,$2)',[tenant(req),clean(req.body.name,80)]);res.status(201).json({ok:true});}catch(e){if(e.code==='23505')return res.status(409).json({error:'Categoria já existe.'});throw e;}});
 app.patch('/api/config/categories/:id',requireAuth,requireRole('admin'),async(req,res)=>{await query('UPDATE categories SET name=$1,active=$2 WHERE id=$3 AND organization_id=$4',[clean(req.body.name,80),Boolean(req.body.active),Number(req.params.id),tenant(req)]);res.json({ok:true});});
 app.post('/api/config/departments',requireAuth,requireRole('admin'),async(req,res)=>{try{await query('INSERT INTO departments(organization_id,name) VALUES($1,$2)',[tenant(req),clean(req.body.name,100)]);res.status(201).json({ok:true});}catch(e){if(e.code==='23505')return res.status(409).json({error:'Setor já existe.'});throw e;}});
 app.patch('/api/config/departments/:id',requireAuth,requireRole('admin'),async(req,res)=>{await query('UPDATE departments SET name=$1,active=$2 WHERE id=$3 AND organization_id=$4',[clean(req.body.name,100),Boolean(req.body.active),Number(req.params.id),tenant(req)]);res.json({ok:true});});
-app.patch('/api/config/settings',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),allowed=['brand_name','company_name','brand_tagline','support_email','sla_low','sla_medium','sla_high','sla_urgent','primary_color','brand_logo'];for(const key of allowed)if(req.body[key]!==undefined){let v=clean(req.body[key],160);if(key.startsWith('sla_'))v=String(Math.max(1,Math.min(720,Number(v)||1)));if(key==='primary_color'&&!/^#[0-9a-fA-F]{6}$/.test(v))v='#56d4c4';await query('INSERT INTO organization_settings(organization_id,key,value,updated_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(organization_id,key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()',[oid,key,v]);if(key==='primary_color')await query('UPDATE organizations SET primary_color=$1,updated_at=NOW() WHERE id=$2',[v,oid]);}res.json({ok:true});});
+app.patch('/api/config/settings',requireAuth,requireRole('admin'),async(req,res)=>{const oid=tenant(req),allowed=['brand_name','company_name','brand_tagline','support_email','sla_low','sla_medium','sla_high','sla_urgent','primary_color','brand_logo'];for(const key of allowed)if(req.body[key]!==undefined){let v=clean(req.body[key],160);if(key.startsWith('sla_'))v=String(Math.max(1,Math.min(720,Number(v)||1)));if(key==='primary_color'&&!/^#[0-9a-fA-F]{6}$/.test(v))v='#56d4c4';await query('INSERT INTO organization_settings(organization_id,key,value,updated_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(organization_id,key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()',[oid,key,v]);if(key==='primary_color')await query('UPDATE organizations SET primary_color=$1,updated_at=NOW() WHERE id=$2',[v,oid]);}await audit(req,'settings_updated','settings',oid,{keys:Object.keys(req.body||{})});res.json({ok:true});});
 
 // SaaS Platform / Super Admin
 app.get('/api/platform/plans',requireAuth,requireSuperAdmin,(req,res)=>res.json({plans:[
@@ -120,19 +177,33 @@ const BILLING_PLANS = {
   }
 };
 
-async function mercadoPagoRequest(apiPath, options = {}) {
-  if (!process.env.MP_ACCESS_TOKEN) {
-    const error = new Error('Mercado Pago não configurado.');
+function mercadoPagoAccessToken() {
+  const mode = String(process.env.MP_MODE || 'production').toLowerCase();
+  const token = mode === 'test'
+    ? process.env.MP_TEST_ACCESS_TOKEN
+    : process.env.MP_ACCESS_TOKEN;
+
+  if (!token) {
+    const error = new Error(
+      mode === 'test'
+        ? 'MP_TEST_ACCESS_TOKEN não configurado.'
+        : 'MP_ACCESS_TOKEN não configurado.'
+    );
     error.status = 503;
     throw error;
   }
+  return token;
+}
+
+async function mercadoPagoRequest(apiPath, options = {}) {
+  const accessToken = mercadoPagoAccessToken();
 
   const response = await fetch(
     `https://api.mercadopago.com${apiPath}`,
     {
       ...options,
       headers: {
-        Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         ...(options.headers || {})
       }
@@ -162,6 +233,20 @@ async function mercadoPagoRequest(apiPath, options = {}) {
 }
 
 
+
+/* --------------------------------------------
+   V9 - VISÃO LOCAL DA ASSINATURA
+   -------------------------------------------- */
+app.get('/api/billing/overview',requireAuth,async(req,res)=>{
+  const oid=tenant(req);
+  const org=(await query(`SELECT id,name,status,plan,user_limit,trial_days,trial_ends_at,billing_email,billing_status,mp_subscription_id,billing_updated_at,last_payment_at,next_payment_at,subscription_ends_at,created_at FROM organizations WHERE id=$1`,[oid])).rows[0];
+  if(!org)return res.status(404).json({error:'Empresa não encontrada.'});
+  const users=(await query("SELECT COUNT(*)::int n FROM users WHERE organization_id=$1 AND status!='blocked'",[oid])).rows[0].n;
+  const trialEnd=org.trial_ends_at?new Date(org.trial_ends_at):null;
+  const trialRemaining=trialEnd?Math.max(0,Math.ceil((trialEnd.getTime()-Date.now())/86400000)):null;
+  res.json({organization:org,usersUsed:users,trialDaysRemaining:trialRemaining,plans:Object.values(BILLING_PLANS)});
+});
+
 /* --------------------------------------------
    LISTAR PLANOS
    -------------------------------------------- */
@@ -189,7 +274,6 @@ app.post(
   requireAuth,
   requireRole('admin'),
   async (req, res) => {
-
     const organizationId = tenant(req);
 
     const planId = clean(
@@ -222,25 +306,14 @@ app.post(
       });
     }
 
-    const payerEmail = clean(
-      req.body.email ||
-      organization.billing_email ||
-      req.user.email,
-      160
-    );
-
-    if (!payerEmail) {
-      return res.status(400).json({
-        error: 'Informe um e-mail de cobrança.'
-      });
-    }
-
     /*
-      IMPORTANTE:
-      não usamos localhost aqui.
+      NOVO FLUXO:
+      Em vez de criar uma assinatura diretamente em /preapproval,
+      criamos/reutilizamos um plano em /preapproval_plan e devolvemos
+      o init_point do próprio Mercado Pago.
 
-      APP_URL no Render:
-      https://central-chamados-v4.onrender.com
+      O comprador escolhe o meio de pagamento no checkout do Mercado Pago.
+      Isso evita exigir card_token_id no nosso backend.
     */
 
     const baseUrl = String(
@@ -249,26 +322,49 @@ app.post(
     ).replace(/\/+$/, '');
 
     const backUrl =
-      `${baseUrl}/configuracoes?billing=return`;
+      `${baseUrl}/assinatura?billing=return`;
 
-    const externalReference =
-      `org:${organizationId}:plan:${planId}`;
+    /*
+      IDs podem ser configurados no Render para evitar criar planos repetidos.
+      Ex.:
+        MP_PLAN_STARTER_ID
+        MP_PLAN_PRO_ID
+        MP_PLAN_BUSINESS_ID
 
-    const subscription =
-      await mercadoPagoRequest(
-        '/preapproval',
+      Se o ID não existir, o backend cria o plano automaticamente.
+    */
+    const envPlanKey =
+      `MP_PLAN_${planId.toUpperCase()}_ID`;
+
+    let mpPlanId = clean(
+      process.env[envPlanKey],
+      120
+    );
+
+    let mpPlan = null;
+
+    if (mpPlanId) {
+      try {
+        mpPlan = await mercadoPagoRequest(
+          `/preapproval_plan/${encodeURIComponent(mpPlanId)}`
+        );
+      } catch (error) {
+        console.warn(
+          `Plano Mercado Pago ${mpPlanId} não pôde ser consultado; será recriado.`,
+          error.message
+        );
+        mpPlanId = '';
+      }
+    }
+
+    if (!mpPlanId) {
+      mpPlan = await mercadoPagoRequest(
+        '/preapproval_plan',
         {
           method: 'POST',
-
           body: JSON.stringify({
             reason:
               `Central de Serviços - Plano ${plan.name}`,
-
-            external_reference:
-              externalReference,
-
-            payer_email:
-              payerEmail,
 
             auto_recurring: {
               frequency: 1,
@@ -282,42 +378,110 @@ app.post(
         }
       );
 
+      mpPlanId = mpPlan.id || '';
+
+      if (!mpPlanId) {
+        throw new Error(
+          'Mercado Pago não retornou o ID do plano.'
+        );
+      }
+
+      console.log(
+        `[BILLING] Plano ${planId} criado no Mercado Pago: ${mpPlanId}. ` +
+        `Adicione ${envPlanKey}=${mpPlanId} no Render para reutilizá-lo.`
+      );
+    }
+
+    /*
+      GET /preapproval_plan/{id} e POST /preapproval_plan retornam init_point.
+      Se por algum motivo a primeira resposta não trouxer, consultamos novamente.
+    */
+    if (!mpPlan?.init_point) {
+      mpPlan = await mercadoPagoRequest(
+        `/preapproval_plan/${encodeURIComponent(mpPlanId)}`
+      );
+    }
+
+    const checkoutUrl =
+      mpPlan?.init_point || null;
+
+    if (!checkoutUrl) {
+      throw new Error(
+        'Mercado Pago criou o plano, mas não retornou o link de checkout.'
+      );
+    }
+
+    await ensureBillingCheckoutMap();
+
+    /*
+      Mantém apenas o plano atual do Mercado Pago para esta empresa + plano.
+      Remove IDs antigos que poderiam fazer o /api/billing/sync procurar
+      a assinatura no preapproval_plan errado.
+    */
+    await query(
+      `
+      DELETE FROM billing_checkout_map
+      WHERE organization_id=$1
+        AND plan_id=$2
+        AND mp_plan_id<>$3
+      `,
+      [organizationId, planId, mpPlanId]
+    );
+
+    await query(
+      `
+      INSERT INTO billing_checkout_map
+        (mp_plan_id, organization_id, plan_id, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (mp_plan_id)
+      DO UPDATE SET
+        organization_id=EXCLUDED.organization_id,
+        plan_id=EXCLUDED.plan_id,
+        updated_at=NOW()
+      `,
+      [mpPlanId, organizationId, planId]
+    );
+
+    /*
+      Ainda não existe uma assinatura individual neste momento.
+      Ela será criada pelo Mercado Pago quando o comprador concluir
+      o checkout do plano.
+    */
     await query(
       `
       UPDATE organizations
       SET
-        billing_email=$1,
-        mp_subscription_id=$2,
-        billing_status=$3,
+        billing_status='pending',
         billing_updated_at=NOW(),
         updated_at=NOW()
-      WHERE id=$4
+      WHERE id=$1
       `,
-      [
-        payerEmail,
-        subscription.id || null,
-        subscription.status || 'pending',
-        organizationId
-      ]
+      [organizationId]
+    );
+
+    await audit(
+      req,
+      'billing_checkout_started',
+      'billing',
+      organizationId,
+      {
+        plan: planId,
+        mpPlanId,
+        status: 'pending'
+      }
     );
 
     res.status(201).json({
       ok: true,
-
-      subscriptionId:
-        subscription.id || null,
-
-      status:
-        subscription.status || 'pending',
-
-      checkoutUrl:
-        subscription.init_point || null,
-
-      plan: planId
+      subscriptionId: null,
+      mpPlanId,
+      status: 'pending',
+      checkoutUrl,
+      plan: planId,
+      envPlanKey
     });
   }
 );
-
 
 /* --------------------------------------------
    CONSULTAR ASSINATURA
@@ -424,6 +588,22 @@ app.get(
 
 
 /* --------------------------------------------
+   MAPA CHECKOUT MP -> EMPRESA/PLANO
+   -------------------------------------------- */
+
+async function ensureBillingCheckoutMap() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS billing_checkout_map (
+      mp_plan_id VARCHAR(120) PRIMARY KEY,
+      organization_id INTEGER NOT NULL,
+      plan_id VARCHAR(30) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+/* --------------------------------------------
    SINCRONIZAR ASSINATURA
    -------------------------------------------- */
 
@@ -444,30 +624,72 @@ async function syncMercadoPagoSubscription(
       subscription.external_reference || ''
     );
 
-  /*
-    Formato:
-    org:1:plan:business
-  */
+  let organizationId = null;
+  let planId = null;
 
+  /*
+    Compatibilidade com o fluxo antigo:
+    external_reference = org:1:plan:business
+  */
   const match =
     reference.match(
       /^org:(\d+):plan:(start|business|pro)$/
     );
 
-  if (!match) {
-    console.warn(
-      'Assinatura sem referência reconhecida:',
-      reference
-    );
-
-    return;
+  if (match) {
+    organizationId = Number(match[1]);
+    planId = match[2];
   }
 
-  const organizationId =
-    Number(match[1]);
+  /*
+    Fluxo novo com preapproval_plan:
+    o Mercado Pago informa preapproval_plan_id na assinatura.
+    Usamos o mapa salvo quando o checkout foi iniciado.
+  */
+  if (!organizationId || !planId) {
+    const mpPlanId =
+      String(
+        subscription.preapproval_plan_id ||
+        subscription.preapproval_plan?.id ||
+        ''
+      );
 
-  const planId =
-    match[2];
+    if (mpPlanId) {
+      await ensureBillingCheckoutMap();
+
+      const mapped = (
+        await query(
+          `
+          SELECT organization_id, plan_id
+          FROM billing_checkout_map
+          WHERE mp_plan_id=$1
+          LIMIT 1
+          `,
+          [mpPlanId]
+        )
+      ).rows[0];
+
+      if (mapped) {
+        organizationId = Number(mapped.organization_id);
+        planId = String(mapped.plan_id);
+      }
+    }
+  }
+
+  if (!organizationId || !planId) {
+    console.warn(
+      '[Mercado Pago] Não foi possível associar a assinatura à empresa.',
+      {
+        subscriptionId: subscription.id,
+        externalReference: reference || null,
+        preapprovalPlanId:
+          subscription.preapproval_plan_id ||
+          subscription.preapproval_plan?.id ||
+          null
+      }
+    );
+    return;
+  }
 
   const plan =
     BILLING_PLANS[planId];
@@ -508,6 +730,7 @@ async function syncMercadoPagoSubscription(
         organizationId
       ]
     );
+    await query('INSERT INTO audit_logs(organization_id,actor_id,action,target_type,target_id,details) VALUES($1,NULL,$2,$3,$4,$5)',[organizationId,'billing_authorized','billing',organizationId,JSON.stringify({plan:planId,status:mpStatus,subscriptionId:subscription.id})]);
 
   } else {
 
@@ -532,6 +755,80 @@ async function syncMercadoPagoSubscription(
   }
 }
 
+
+/* --------------------------------------------
+   FALLBACK DE SINCRONIZAÇÃO APÓS CHECKOUT
+   -------------------------------------------- */
+
+app.post(
+  '/api/billing/sync',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+      const organizationId = tenant(req);
+      await ensureBillingCheckoutMap();
+
+      const mappings = (
+        await query(
+          `SELECT mp_plan_id, plan_id
+           FROM billing_checkout_map
+           WHERE organization_id=$1
+           ORDER BY updated_at DESC`,
+          [organizationId]
+        )
+      ).rows;
+
+      if (!mappings.length) {
+        return res.status(404).json({
+          error: 'Nenhum checkout de assinatura encontrado para esta empresa.'
+        });
+      }
+for (const mapping of mappings) {
+        const search = await mercadoPagoRequest(
+          `/preapproval/search?preapproval_plan_id=${encodeURIComponent(mapping.mp_plan_id)}&limit=20`
+        );
+
+        const subscriptions = Array.isArray(search?.results) ? search.results : [];
+        subscriptions.sort((a, b) =>
+          new Date(b.last_modified || b.date_created || 0).getTime() -
+          new Date(a.last_modified || a.date_created || 0).getTime()
+        );
+
+        const candidate = subscriptions.find(
+          (subscription) => subscription?.id
+        );
+
+        if (!candidate) continue;
+
+        await syncMercadoPagoSubscription(candidate.id);
+
+        const org = (
+          await query(
+            `SELECT id, plan, status, billing_status, mp_subscription_id, next_payment_at
+             FROM organizations WHERE id=$1`,
+            [organizationId]
+          )
+        ).rows[0];
+
+        console.log(
+          `[BILLING] Sincronização concluída: org=${organizationId} subscription=${candidate.id} status=${org?.billing_status || 'unknown'}`
+        );
+
+        return res.json({ ok: true, organization: org });
+      }
+
+      return res.status(404).json({
+        error: 'Nenhuma assinatura encontrada no Mercado Pago para os checkouts desta empresa.'
+      });
+    } catch (error) {
+      console.error('[BILLING SYNC] Erro:', error);
+      return res.status(error.status || 500).json({
+        error: error.message || 'Erro ao sincronizar assinatura.'
+      });
+    }
+  }
+);
 
 /* ============================================
    MERCADO PAGO - WEBHOOK
@@ -617,28 +914,33 @@ function validateMercadoPagoWebhook(req) {
 }
 
 app.post('/api/billing/webhook', async (req, res) => {
+  const type =
+    req.body?.type ||
+    req.body?.topic ||
+    req.query?.type ||
+    req.query?.topic ||
+    '';
+
+  const dataId =
+    req.body?.data?.id ||
+    req.query?.['data.id'] ||
+    req.query?.id ||
+    req.body?.id ||
+    null;
+
+  /*
+    Log ANTES da resposta para ficar visível no Render inclusive
+    durante a simulação de Webhook do painel do Mercado Pago.
+    Nunca registramos Access Token ou outros segredos.
+  */
+  console.log(
+    `[MP WEBHOOK RECEBIDO] type=${type || 'sem-tipo'} id=${dataId || 'sem-id'}`
+  );
+
   // Confirma rapidamente o recebimento para o Mercado Pago.
   res.status(200).json({ received: true });
 
   try {
-    const type =
-      req.body?.type ||
-      req.body?.topic ||
-      req.query?.type ||
-      req.query?.topic ||
-      '';
-
-    const dataId =
-      req.body?.data?.id ||
-      req.query?.['data.id'] ||
-      req.query?.id ||
-      req.body?.id ||
-      null;
-
-    console.log('[Mercado Pago Webhook]', {
-      type,
-      dataId
-    });
 
     const signature = validateMercadoPagoWebhook(req);
 
@@ -720,5 +1022,5 @@ app.post('/api/billing/webhook', async (req, res) => {
   }
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,version:'8.0.0-clean',mode:'multi-tenant-saas',time:new Date().toISOString()}));app.use('/api',(req,res)=>res.status(404).json({error:'Rota não encontrada.'}));app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Erro interno do servidor.'});});
+app.get('/health',(req,res)=>res.json({ok:true,version:'9.0.0',mode:'multi-tenant-saas',time:new Date().toISOString()}));app.use('/api',(req,res)=>res.status(404).json({error:'Rota não encontrada.'}));app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Erro interno do servidor.'});});
 initDatabase().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`Central de Serviços V8 Clean em http://localhost:${PORT}`))).catch(e=>{console.error('Falha ao iniciar:',e);process.exit(1);});
