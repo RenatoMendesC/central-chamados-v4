@@ -142,7 +142,7 @@ async function loadUser(req){
     u.billing_required=
       u.trial_expired ||
       u.subscription_expired ||
-      (["inactive","cancelled","paused"].includes(u.organization_billing_status) && u.organization_status!=="trial");
+      (["inactive","pending","cancelled","paused"].includes(u.organization_billing_status) && u.organization_status!=="trial");
 
     return u;
 
