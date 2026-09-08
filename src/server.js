@@ -6,33 +6,6 @@ const app=express(),PORT=Number(process.env.PORT||3000),ROOT=path.join(__dirname
 const limiter=rateLimit({windowMs:15*60*1000,limit:20,standardHeaders:true,legacyHeaders:false,message:{error:'Muitas tentativas. Aguarde alguns minutos.'}}),page=f=>path.join(ROOT,'views',f),clean=(v,m=300)=>String(v||'').trim().slice(0,m),priority=p=>['low','medium','high','urgent'].includes(p)?p:'medium',status=s=>['open','progress','resolved','closed'].includes(s)?s:'open',impact=s=>['low','medium','high'].includes(s)?s:'medium';
 const pub=u=>({id:Number(u.id),organizationId:Number(u.organization_id),organizationName:u.organization_name||null,isSuperAdmin:Boolean(u.is_super_admin),name:u.name,username:u.username,email:u.email,department:u.department,role:u.role,status:u.status,photoData:u.photo_data||null,createdAt:u.created_at,lastLoginAt:u.last_login_at});
 function tenant(req){if(req.user.is_super_admin){const h=Number(req.get('x-organization-id'));if(h>0)return h;}return Number(req.user.organization_id);}
-
-const PLAN_LEVEL={start:1,business:2,pro:3};
-function requirePlan(minPlan){
-  return async(req,res,next)=>{
-    try{
-      if(req.user?.is_super_admin)return next();
-      const oid=tenant(req);
-      const r=await query('SELECT plan FROM organizations WHERE id=$1',[oid]);
-      const organization=r.rows[0];
-      if(!organization)return res.status(404).json({error:'Empresa não encontrada.'});
-      const currentPlan=String(organization.plan||'start').toLowerCase();
-      const requiredLevel=PLAN_LEVEL[minPlan]||1;
-      const currentLevel=PLAN_LEVEL[currentPlan]||1;
-      if(currentLevel<requiredLevel){
-        return res.status(403).json({
-          error:`Recurso disponível a partir do plano ${minPlan==='business'?'Business':'Pro'}.`,
-          code:'PLAN_UPGRADE_REQUIRED',
-          currentPlan,
-          requiredPlan:minPlan
-        });
-      }
-      return next();
-    }catch(error){
-      return next(error);
-    }
-  };
-}
 async function assertTenant(req){const oid=tenant(req),r=await query("SELECT * FROM organizations WHERE id=$1",[oid]);const o=r.rows[0];if(!o)throw Object.assign(new Error('Empresa não encontrada.'),{status:404});if(o.status==='suspended'&&!req.user.is_super_admin)throw Object.assign(new Error('Empresa suspensa.'),{status:403});return o;}
 async function audit(req,action,type,id,details={}){await query('INSERT INTO audit_logs(organization_id,actor_id,action,target_type,target_id,details) VALUES($1,$2,$3,$4,$5,$6)',[tenant(req),req.user?.id||null,action,type,id||null,JSON.stringify(details)]);}
 async function event(req,ticketId,type,details={}){await query('INSERT INTO ticket_events(organization_id,ticket_id,actor_id,event_type,details) VALUES($1,$2,$3,$4,$5)',[tenant(req),ticketId,req.user?.id||null,type,JSON.stringify(details)]);}
@@ -40,6 +13,39 @@ async function notify(oid,uid,tid,title,body){if(uid)await query('INSERT INTO no
 async function setting(oid,key,fallback=''){const r=await query('SELECT value FROM organization_settings WHERE organization_id=$1 AND key=$2',[oid,key]);return r.rows[0]?.value??fallback;}
 async function dueFor(oid,p){const h=Number(await setting(oid,`sla_${p}`,{low:72,medium:48,high:24,urgent:4}[p]));return new Date(Date.now()+Math.max(1,h)*3600000).toISOString();}
 const canSee=(u,t)=>u.role!=='requester'||Number(t.requester_id)===Number(u.id);
+
+const PLAN_LEVEL={start:1,business:2,pro:3};
+async function planAccess(req,minPlan='start'){
+  if(req.user?.is_super_admin)return true;
+  const oid=tenant(req);
+  const r=await query('SELECT plan,status,trial_ends_at FROM organizations WHERE id=$1',[oid]);
+  const org=r.rows[0];
+  if(!org)return false;
+
+  // Trial válido libera todos os recursos para teste.
+  if(org.status==='trial'&&org.trial_ends_at&&new Date(org.trial_ends_at).getTime()>Date.now())return true;
+
+  const current=PLAN_LEVEL[String(org.plan||'start').toLowerCase()]||1;
+  const required=PLAN_LEVEL[String(minPlan||'start').toLowerCase()]||1;
+  return current>=required;
+}
+function requirePlan(minPlan='start'){
+  return async(req,res,next)=>{
+    try{
+      if(await planAccess(req,minPlan))return next();
+      return res.status(403).json({error:`Recurso disponível a partir do plano ${minPlan==='business'?'Business':'Pro'}.`});
+    }catch(err){next(err);}
+  };
+}
+function requirePlanPage(minPlan='start'){
+  return async(req,res,next)=>{
+    try{
+      if(await planAccess(req,minPlan))return next();
+      return res.redirect('/assinatura?upgrade='+encodeURIComponent(minPlan));
+    }catch(err){next(err);}
+  };
+}
+
 function pickChanges(before,after,fields){
   const changes={};
   for(const field of fields){
@@ -54,7 +60,7 @@ function pickChanges(before,after,fields){
 app.get('/',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect(u.is_super_admin?'/plataforma':'/dashboard');res.sendFile(page('index.html'));});
 app.get('/apresentacao',(req,res)=>res.sendFile(page('apresentacao.html')));
 app.get('/criar-conta',async(req,res)=>{const u=await loadUser(req);if(u)return res.redirect('/dashboard');res.sendFile(page('criar-conta.html'));});
-for(const [url,file,roles] of [['/dashboard','dashboard.html',[]],['/chamados','chamados.html',[]],['/ativos','ativos.html',['admin','agent']],['/base-conhecimento','base-conhecimento.html',[]],['/relatorios','relatorios.html',['admin']],['/historico','historico.html',['admin','agent']],['/usuarios','usuarios.html',['admin']],['/assinatura','assinatura.html',[]],['/configuracoes','configuracoes.html',['admin']]])app.get(url,requireAuth,...(roles.length?[requireRole(...roles)]:[]),(req,res)=>res.sendFile(page(file)));
+for(const [url,file,roles,minPlan] of [['/dashboard','dashboard.html',[],null],['/chamados','chamados.html',[],null],['/ativos','ativos.html',['admin','agent'],'business'],['/base-conhecimento','base-conhecimento.html',[],null],['/relatorios','relatorios.html',['admin'],'business'],['/historico','historico.html',['admin','agent'],'business'],['/usuarios','usuarios.html',['admin'],null],['/assinatura','assinatura.html',[],null],['/configuracoes','configuracoes.html',['admin'],null]])app.get(url,requireAuth,...(roles.length?[requireRole(...roles)]:[]),...(minPlan?[requirePlanPage(minPlan)]:[]),(req,res)=>res.sendFile(page(file)));
 app.get('/plataforma',requireAuth,requireSuperAdmin,(req,res)=>res.sendFile(page('plataforma.html')));
 
 // Auth + invitation-only signup
