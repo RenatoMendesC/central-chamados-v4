@@ -12,16 +12,25 @@ express.response.sendFile=function(filePath,options,callback){
         if(cb)return cb(err);
         return this.status(500).send('Erro ao carregar a página.');
       }
+
       if(!html.includes('/assets/theme-orange.css')){
         html=html.replace('</head>','<link rel="stylesheet" href="/assets/theme-orange.css?v=6"></head>');
       }else{
         html=html.replace(/\/assets\/theme-orange\.css\?v=[^"']+/g,'/assets/theme-orange.css?v=6');
       }
+
+      if(!html.includes('/assets/layout-pro.css')){
+        html=html.replace('</head>','<link rel="stylesheet" href="/assets/layout-pro.css?v=1"></head>');
+      }else{
+        html=html.replace(/\/assets\/layout-pro\.css\?v=[^"']+/g,'/assets/layout-pro.css?v=1');
+      }
+
       if(!html.includes('/assets/theme-lock.js')){
         html=html.replace('</body>','<script src="/assets/theme-lock.js?v=1"></script></body>');
       }else{
         html=html.replace(/\/assets\/theme-lock\.js\?v=[^"']+/g,'/assets/theme-lock.js?v=1');
       }
+
       this.type('html').send(html);
       if(cb)cb();
     });
