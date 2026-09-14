@@ -13,9 +13,9 @@ express.response.sendFile=function(filePath,options,callback){
         return this.status(500).send('Erro ao carregar a página.');
       }
       if(!html.includes('/assets/theme-orange.css')){
-        html=html.replace('</head>','<link rel="stylesheet" href="/assets/theme-orange.css?v=3"></head>');
+        html=html.replace('</head>','<link rel="stylesheet" href="/assets/theme-orange.css?v=5"></head>');
       }else{
-        html=html.replace(/\/assets\/theme-orange\.css\?v=[^"']+/g,'/assets/theme-orange.css?v=3');
+        html=html.replace(/\/assets\/theme-orange\.css\?v=[^"']+/g,'/assets/theme-orange.css?v=5');
       }
       this.type('html').send(html);
       if(cb)cb();
