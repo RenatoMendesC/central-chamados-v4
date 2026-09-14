@@ -5,12 +5,10 @@
   "description": "Central de Serviços V9 - SaaS multiempresa com modo demo e auditoria",
   "main": "src/server.js",
   "scripts": {
-    "start": "node -r ./src/email-hooks.js -r ./src/demo-hooks.js src/server.js",
-    "dev": "node --watch -r ./src/email-hooks.js -r ./src/demo-hooks.js src/server.js"
+    "start": "node -r ./src/email-hooks.js -r ./src/demo-hooks.js -r ./src/theme-hooks.js src/server.js",
+    "dev": "node --watch -r ./src/email-hooks.js -r ./src/demo-hooks.js -r ./src/theme-hooks.js src/server.js"
   },
-  "engines": {
-    "node": ">=20"
-  },
+  "engines": {"node": ">=20"},
   "dependencies": {
     "bcryptjs": "latest",
     "cookie-parser": "latest",
