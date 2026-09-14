@@ -1,12 +1,12 @@
 {
   "name": "central-servicos-v8-comercial",
-  "version": "9.1.0",
+  "version": "9.1.1",
   "private": true,
-  "description": "Central de Serviços V9 - SaaS multiempresa com assinatura e auditoria",
+  "description": "Central de Serviços V9 - SaaS multiempresa com modo demo e auditoria",
   "main": "src/server.js",
   "scripts": {
-    "start": "node -r ./src/email-hooks.js src/server.js",
-    "dev": "node --watch -r ./src/email-hooks.js src/server.js"
+    "start": "node -r ./src/email-hooks.js -r ./src/demo-hooks.js src/server.js",
+    "dev": "node --watch -r ./src/email-hooks.js -r ./src/demo-hooks.js src/server.js"
   },
   "engines": {
     "node": ">=20"
