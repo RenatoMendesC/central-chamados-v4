@@ -1,5 +1,6 @@
 require('dotenv').config();
 const path=require('path'),express=require('express'),cookieParser=require('cookie-parser'),helmet=require('helmet'),bcrypt=require('bcryptjs'),rateLimit=require('express-rate-limit'),crypto=require('crypto');
+require('./theme-hooks');
 const {query}=require('./db'); const {initDatabase}=require('./schema'); const {setAuthCookie,clearAuthCookie,loadUser,requireAuth,requireRole,requireSuperAdmin}=require('./auth');
 if(!process.env.DATABASE_URL)throw new Error('DATABASE_URL não configurada.'); if(!process.env.JWT_SECRET||process.env.JWT_SECRET.length<20)throw new Error('JWT_SECRET precisa ter pelo menos 20 caracteres.');
 const app=express(),PORT=Number(process.env.PORT||3000),ROOT=path.join(__dirname,'..'); app.disable('x-powered-by');app.set('trust proxy',1);app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'3mb'}));app.use(express.urlencoded({extended:false,limit:'3mb'}));app.use(cookieParser());app.use('/assets',express.static(path.join(ROOT,'public'),{etag:false,maxAge:0,setHeaders:(res)=>{res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate');res.setHeader('Pragma','no-cache');res.setHeader('Expires','0');}}));
